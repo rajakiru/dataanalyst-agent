@@ -1,0 +1,8 @@
+mcp
+openai
+pandas
+matplotlib
+seaborn
+scikit-learn
+streamlit
+python-dotenv
