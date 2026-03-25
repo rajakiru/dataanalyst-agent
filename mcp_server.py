@@ -1,6 +1,6 @@
 """
 MCP Server: Data Analysis Tools
-Exposes 10 tools via stdio transport for the collection agent to call.
+Exposes 14 tools via stdio transport for the collection agent to call.
 """
 
 import json
@@ -182,6 +182,64 @@ async def list_tools() -> list[Tool]:
                 "required": ["csv_path"],
             },
         ),
+        Tool(
+            name="compute_data_quality_score",
+            description=(
+                "Compute an overall data quality score (0-100) and a breakdown across three dimensions: "
+                "completeness (non-null ratio), uniqueness (non-duplicate ratio), and consistency "
+                "(type uniformity and low-variance detection). Also returns a list of specific issues found."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "csv_path": {"type": "string", "description": "Absolute path to the CSV file."},
+                },
+                "required": ["csv_path"],
+            },
+        ),
+        Tool(
+            name="detect_duplicates",
+            description=(
+                "Detect duplicate rows in the dataset. Returns the count, percentage, and the "
+                "first 5 duplicate rows as examples."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "csv_path": {"type": "string", "description": "Absolute path to the CSV file."},
+                },
+                "required": ["csv_path"],
+            },
+        ),
+        Tool(
+            name="plot_missing_heatmap",
+            description=(
+                "Generate a heatmap showing which cells in the dataset are missing (null). "
+                "Only generates a plot if missing values exist. Returns the path to the saved PNG."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "csv_path": {"type": "string", "description": "Absolute path to the CSV file."},
+                },
+                "required": ["csv_path"],
+            },
+        ),
+        Tool(
+            name="plot_qq",
+            description=(
+                "Generate a Q-Q (quantile-quantile) plot for a numeric column to visually assess "
+                "whether it follows a normal distribution. Returns the path to the saved PNG."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "csv_path": {"type": "string", "description": "Absolute path to the CSV file."},
+                    "column": {"type": "string", "description": "Name of the numeric column to plot."},
+                },
+                "required": ["csv_path", "column"],
+            },
+        ),
     ]
 
 
@@ -211,6 +269,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         result = _test_normality(arguments["csv_path"], arguments["column"])
     elif name == "plot_pairplot":
         result = _plot_pairplot(arguments["csv_path"])
+    elif name == "compute_data_quality_score":
+        result = _compute_data_quality_score(arguments["csv_path"])
+    elif name == "detect_duplicates":
+        result = _detect_duplicates(arguments["csv_path"])
+    elif name == "plot_missing_heatmap":
+        result = _plot_missing_heatmap(arguments["csv_path"])
+    elif name == "plot_qq":
+        result = _plot_qq(arguments["csv_path"], arguments["column"])
     else:
         result = {"error": f"Unknown tool: {name}"}
 
@@ -484,6 +550,155 @@ def _plot_pairplot(csv_path: str) -> dict:
     plt.close("all")
 
     return {"plot_path": out_path, "columns_plotted": numeric_cols, "hue": hue_col}
+
+
+def _compute_data_quality_score(csv_path: str) -> dict:
+    df = _load(csv_path)
+
+    # Completeness: fraction of non-null values across entire dataframe
+    total_cells = df.size
+    missing_cells = int(df.isnull().sum().sum())
+    completeness = round((1 - missing_cells / total_cells) * 100, 2) if total_cells else 100.0
+
+    # Uniqueness: fraction of non-duplicate rows
+    duplicate_count = int(df.duplicated().sum())
+    uniqueness = round((1 - duplicate_count / len(df)) * 100, 2) if len(df) else 100.0
+
+    # Consistency: penalise zero/near-zero variance columns and mixed-type columns
+    issues = []
+    consistency_penalties = 0
+
+    for col in df.columns:
+        # Near-zero variance numeric columns
+        if pd.api.types.is_numeric_dtype(df[col]):
+            if df[col].nunique() <= 1:
+                issues.append({"column": col, "issue": "constant column (zero variance)", "severity": "high"})
+                consistency_penalties += 20
+            elif df[col].std() < 1e-6:
+                issues.append({"column": col, "issue": "near-zero variance", "severity": "medium"})
+                consistency_penalties += 10
+
+        # Mixed types in object columns (some values parseable as numbers, others not)
+        if df[col].dtype == object:
+            sample = df[col].dropna().head(100)
+            numeric_like = sample.apply(lambda x: str(x).replace(".", "", 1).lstrip("-").isdigit())
+            ratio = numeric_like.mean()
+            if 0 < ratio < 0.8:
+                issues.append({"column": col, "issue": f"mixed types ({ratio:.0%} numeric-like)", "severity": "high"})
+                consistency_penalties += 15
+
+    consistency_penalties = min(consistency_penalties, 100)
+    consistency = round(max(0.0, 100.0 - consistency_penalties), 2)
+
+    # Null-per-column issues
+    null_pct = df.isnull().mean() * 100
+    for col, pct in null_pct.items():
+        if pct > 50:
+            issues.append({"column": col, "issue": f"{pct:.1f}% missing values", "severity": "high"})
+        elif pct > 10:
+            issues.append({"column": col, "issue": f"{pct:.1f}% missing values", "severity": "medium"})
+
+    if duplicate_count > 0:
+        issues.append({
+            "column": "—",
+            "issue": f"{duplicate_count} duplicate rows ({duplicate_count/len(df)*100:.1f}%)",
+            "severity": "medium" if duplicate_count / len(df) < 0.1 else "high",
+        })
+
+    # Overall score: weighted average
+    overall = round(completeness * 0.4 + uniqueness * 0.3 + consistency * 0.3, 1)
+
+    return {
+        "overall_score": overall,
+        "breakdown": {
+            "completeness": completeness,
+            "uniqueness": uniqueness,
+            "consistency": consistency,
+        },
+        "missing_cells": missing_cells,
+        "duplicate_rows": duplicate_count,
+        "issues": issues,
+    }
+
+
+def _detect_duplicates(csv_path: str) -> dict:
+    df = _load(csv_path)
+    mask = df.duplicated(keep=False)
+    duplicate_count = int(df.duplicated().sum())
+    pct = round(duplicate_count / len(df) * 100, 2) if len(df) else 0.0
+
+    examples = []
+    if duplicate_count:
+        examples = df[mask].head(5).to_dict(orient="records")
+
+    return {
+        "duplicate_rows": duplicate_count,
+        "duplicate_pct": pct,
+        "total_rows": len(df),
+        "examples": examples,
+    }
+
+
+def _plot_missing_heatmap(csv_path: str) -> dict:
+    df = _load(csv_path)
+    missing_counts = df.isnull().sum()
+
+    if missing_counts.sum() == 0:
+        return {"message": "No missing values found — heatmap not generated."}
+
+    # Keep only columns that have at least one missing value
+    cols_with_nulls = missing_counts[missing_counts > 0].index.tolist()
+    plot_df = df[cols_with_nulls]
+
+    # Cap rows for readability
+    max_rows = 200
+    if len(plot_df) > max_rows:
+        plot_df = plot_df.iloc[:max_rows]
+        truncated = True
+    else:
+        truncated = False
+
+    fig, ax = plt.subplots(figsize=(max(6, len(cols_with_nulls) * 0.8), min(10, len(plot_df) * 0.06 + 2)))
+    sns.heatmap(plot_df.isnull(), cbar=False, yticklabels=False,
+                cmap=["#2ecc71", "#e74c3c"], ax=ax)
+    ax.set_title(f"Missing Value Map{' (first 200 rows)' if truncated else ''}\n(red = missing, green = present)")
+    ax.set_xlabel("Columns")
+    fig.tight_layout()
+
+    out_path = os.path.join(OUTPUT_DIR, "missing_heatmap.png")
+    fig.savefig(out_path, dpi=100)
+    plt.close(fig)
+
+    return {"plot_path": out_path, "columns_with_missing": cols_with_nulls, "truncated": truncated}
+
+
+def _plot_qq(csv_path: str, column: str) -> dict:
+    df = _load(csv_path)
+    if column not in df.columns:
+        return {"error": f"Column '{column}' not found."}
+    if not pd.api.types.is_numeric_dtype(df[column]):
+        return {"error": f"Column '{column}' is not numeric."}
+
+    series = df[column].dropna()
+    if len(series) < 3:
+        return {"error": "Need at least 3 non-null values for a Q-Q plot."}
+
+    fig, ax = plt.subplots(figsize=(5, 5))
+    (osm, osr), (slope, intercept, r) = scipy_stats.probplot(series, dist="norm")
+    ax.plot(osm, osr, "o", alpha=0.5, markersize=4, color="steelblue", label="Data")
+    ax.plot(osm, slope * osm + intercept, "r-", linewidth=1.5, label="Normal fit")
+    ax.set_title(f"Q-Q Plot: {column}\n(R²={r**2:.3f})")
+    ax.set_xlabel("Theoretical quantiles")
+    ax.set_ylabel("Sample quantiles")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+
+    safe_col = column.replace("/", "_").replace(" ", "_")
+    out_path = os.path.join(OUTPUT_DIR, f"qq_{safe_col}.png")
+    fig.savefig(out_path, dpi=100)
+    plt.close(fig)
+
+    return {"plot_path": out_path, "column": column, "r_squared": round(r ** 2, 4)}
 
 
 # ---------------------------------------------------------------------------

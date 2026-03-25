@@ -4,6 +4,7 @@ Uses Dedalus (OpenAI-compatible) for LLM calls and MCP stdio for tool execution.
 """
 
 import asyncio
+import glob
 import json
 import os
 import sys
@@ -16,8 +17,8 @@ from openai import OpenAI
 
 load_dotenv()
 
-DEDALUS_BASE_URL = os.getenv("DEDALUS_BASE_URL", "https://api.dedaluslabs.ai")
-DEDALUS_API_KEY = os.getenv("DEDALUS_API_KEY", "")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "gpt-4o-mini")
 
 MCP_SERVER_PATH = os.path.join(os.path.dirname(__file__), "mcp_server.py")
@@ -39,7 +40,7 @@ def _mcp_tool_to_openai(tool) -> dict:
     }
 
 
-async def _run_pipeline_async(csv_path: str, model: str) -> dict:
+async def _run_pipeline_async(csv_path: str, model: str, api_key: str = "") -> dict:
     """
     Full async pipeline:
     1. Spawn MCP server subprocess (stdio).
@@ -47,6 +48,14 @@ async def _run_pipeline_async(csv_path: str, model: str) -> dict:
     3. Reporting agent: LLM summarises all tool outputs into a narrative.
     Returns a dict with all results.
     """
+    # Clear stale plots from previous runs before starting
+    outputs_dir = os.path.join(os.path.dirname(MCP_SERVER_PATH), "outputs")
+    for old_file in glob.glob(os.path.join(outputs_dir, "*.png")):
+        try:
+            os.remove(old_file)
+        except OSError:
+            pass
+
     server_params = StdioServerParameters(
         command=sys.executable,
         args=[MCP_SERVER_PATH],
@@ -65,7 +74,8 @@ async def _run_pipeline_async(csv_path: str, model: str) -> dict:
             # ----------------------------------------------------------------
             # Collection Agent
             # ----------------------------------------------------------------
-            client = OpenAI(api_key=DEDALUS_API_KEY, base_url=DEDALUS_BASE_URL)
+            effective_key = api_key or OPENAI_API_KEY
+            client = OpenAI(api_key=effective_key, base_url=OPENAI_BASE_URL)
 
             system_prompt = f"""You are an expert data analyst agent. You have access to tools that
 operate on CSV files. Your goal is to produce the most insightful analysis possible for the
@@ -144,6 +154,7 @@ You will first be asked to reason and plan. Then execute your plan."""
             plan_response = client.chat.completions.create(
                 model=model,
                 messages=messages,
+                tools=openai_tools,
                 tool_choice="none",  # reasoning only — no tool calls
             )
             plan_msg = plan_response.choices[0].message
@@ -194,6 +205,134 @@ You will first be asked to reason and plan. Then execute your plan."""
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
 
             # ----------------------------------------------------------------
+            # Data Quality Agent
+            # ----------------------------------------------------------------
+            # Summarise what the collection agent already found about the schema
+            schema_summary = json.dumps(
+                next((r["result"] for r in tool_results if r["tool"] == "infer_schema"), {}),
+                indent=2,
+            )
+
+            quality_system_prompt = f"""You are a data quality auditor agent. Your job is to thoroughly
+assess the quality of a CSV dataset and identify issues that could affect downstream analysis or
+machine learning pipelines. This is directly motivated by research showing that poor data quality
+leads to cascading failures in AI systems.
+
+The CSV file path for ALL tool calls is: {csv_path}
+
+You have access to four quality-focused tools:
+- `compute_data_quality_score`: Always call this first — it gives you a structured quality breakdown.
+- `detect_duplicates`: Always call this to check for duplicate rows.
+- `plot_missing_heatmap`: Call this only if the quality score reveals missing values.
+- `plot_qq`: Call this for each numeric column to visually assess normality deviations.
+
+Be thorough. After running all relevant tools, stop and provide a concise quality summary."""
+
+            quality_messages = [
+                {"role": "system", "content": quality_system_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Please audit the data quality of this dataset.\n\n"
+                        f"Schema (from collection agent):\n{schema_summary}"
+                    ),
+                },
+            ]
+
+            quality_tool_results: list[dict] = []
+            quality_plot_paths: list[str] = []
+
+            # Force quality score first
+            dq_response = client.chat.completions.create(
+                model=model,
+                messages=quality_messages,
+                tools=openai_tools,
+                tool_choice={"type": "function", "function": {"name": "compute_data_quality_score"}},
+            )
+            dq_msg = dq_response.choices[0].message
+            quality_messages.append(dq_msg.model_dump(exclude_unset=True))
+
+            if dq_msg.tool_calls:
+                tc = dq_msg.tool_calls[0]
+                mcp_result = await session.call_tool("compute_data_quality_score", json.loads(tc.function.arguments))
+                result_text = "{}"
+                if mcp_result.content:
+                    first = mcp_result.content[0]
+                    if hasattr(first, "text") and first.text:
+                        result_text = first.text
+                try:
+                    result_dict = json.loads(result_text)
+                except json.JSONDecodeError:
+                    result_dict = {"error": result_text}
+                quality_tool_results.append({"tool": "compute_data_quality_score", "args": {}, "result": result_dict})
+                quality_messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
+
+            # Let the agent run remaining quality tools autonomously.
+            # Cap scales with column count: at minimum 20, plus 2 per column
+            # (one detect_duplicates + one plot_qq each, plus overhead).
+            schema_for_cap = next(
+                (r["result"] for r in tool_results if r["tool"] == "infer_schema"), {}
+            )
+            n_cols = schema_for_cap.get("shape", {}).get("cols", 10)
+            quality_iter_cap = max(20, n_cols * 2 + 5)
+
+            for _ in range(quality_iter_cap):
+                dq_response = client.chat.completions.create(
+                    model=model,
+                    messages=quality_messages,
+                    tools=openai_tools,
+                    tool_choice="auto",
+                )
+                dq_msg = dq_response.choices[0].message
+                quality_messages.append(dq_msg.model_dump(exclude_unset=True))
+
+                if not dq_msg.tool_calls:
+                    break
+
+                for tc in dq_msg.tool_calls:
+                    fn_name = tc.function.name
+                    fn_args = json.loads(tc.function.arguments)
+                    mcp_result = await session.call_tool(fn_name, fn_args)
+
+                    result_text = "{}"
+                    if mcp_result.content:
+                        first = mcp_result.content[0]
+                        if hasattr(first, "text") and first.text and first.text.strip():
+                            result_text = first.text
+                        elif isinstance(first, dict):
+                            result_text = first.get("text", "{}")
+
+                    try:
+                        result_dict = json.loads(result_text)
+                    except json.JSONDecodeError:
+                        result_dict = {"error": result_text}
+
+                    if "plot_path" in result_dict:
+                        quality_plot_paths.append(result_dict["plot_path"])
+
+                    quality_tool_results.append({"tool": fn_name, "args": fn_args, "result": result_dict})
+                    quality_messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
+
+            # Quality narrative
+            quality_context = json.dumps(
+                [{"tool": r["tool"], "result": r["result"]} for r in quality_tool_results],
+                indent=2,
+            )
+            quality_report_response = client.chat.completions.create(
+                model=model,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"Based on these data quality audit results, write a concise quality report (2-3 paragraphs). "
+                        f"Cover: the overall quality score and what it means, specific issues found and their severity, "
+                        f"and concrete recommendations for fixing each issue before using this data in analysis or ML.\n\n"
+                        f"Results:\n{quality_context}"
+                    ),
+                }],
+            )
+            quality_narrative = quality_report_response.choices[0].message.content
+
+            # ----------------------------------------------------------------
             # Reporting Agent
             # ----------------------------------------------------------------
             context = json.dumps(
@@ -226,12 +365,15 @@ Write the report in plain English, suitable for a non-technical audience."""
                 "plot_paths": plot_paths,
                 "narrative": narrative,
                 "analysis_plan": analysis_plan,
+                "quality_tool_results": quality_tool_results,
+                "quality_plot_paths": quality_plot_paths,
+                "quality_narrative": quality_narrative,
             }
 
 
-def run_pipeline(csv_path: str, model: str = DEFAULT_MODEL) -> dict:
+def run_pipeline(csv_path: str, model: str = DEFAULT_MODEL, api_key: str = "") -> dict:
     """Synchronous entry point — wraps the async pipeline for Streamlit."""
-    return asyncio.run(_run_pipeline_async(csv_path, model))
+    return asyncio.run(_run_pipeline_async(csv_path, model, api_key))
 
 
 # ---------------------------------------------------------------------------
