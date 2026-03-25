@@ -67,35 +67,93 @@ async def _run_pipeline_async(csv_path: str, model: str) -> dict:
             # ----------------------------------------------------------------
             client = OpenAI(api_key=DEDALUS_API_KEY, base_url=DEDALUS_BASE_URL)
 
-            system_prompt = f"""You are an expert data analyst agent. You have access to a set of
-analysis tools that operate on CSV files. Your job is to thoroughly analyse the provided dataset.
+            system_prompt = f"""You are an expert data analyst agent. You have access to tools that
+operate on CSV files. Your goal is to produce the most insightful analysis possible for the
+specific dataset you are given — not to blindly run every tool.
 
-The CSV file path you must use for ALL tool calls is:
-  {csv_path}
+The CSV file path for ALL tool calls is: {csv_path}
 
-Always pass this exact path as the `csv_path` argument to every tool.
+DECISION RULES — apply these based on what you observe in the data:
+- Run `summarize_statistics` and `test_normality` for every numeric column found.
+- Run `compute_correlations`, `plot_correlation_heatmap`, and `plot_pairplot` ONLY if there are 2+ numeric columns.
+- Run `plot_scatter` ONLY for column pairs where |correlation| > 0.5. Skip it if no strong correlations exist.
+- Run `plot_boxplot` ONLY if there are both numeric columns and categorical columns with ≤15 unique values.
+- Run `plot_distribution` for every column (numeric or categorical).
+- Run `detect_anomalies` for every numeric column.
+- If a column has high skewness (>1 or <-1), note this when interpreting its anomaly results.
+- Do NOT call a tool that is irrelevant to this dataset's structure.
 
-Follow this strategy:
-1. Call `infer_schema` with csv_path="{csv_path}" to understand the dataset structure.
-2. Call `summarize_statistics` with csv_path="{csv_path}" to get descriptive stats.
-3. If there are 2+ numeric columns, call `compute_correlations` and `plot_correlation_heatmap`.
-4. For each numeric column identified in the schema, call `plot_distribution`.
-5. For each numeric column, call `detect_anomalies`.
-6. Once you have collected all results, stop calling tools and provide a brief completion message.
-
-Be systematic and thorough. Do not skip columns."""
+You will first be asked to reason and plan. Then execute your plan."""
 
             messages = [
                 {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": f"Please analyse this CSV file: {csv_path}",
-                },
+                {"role": "user", "content": f"Please analyse this CSV file: {csv_path}"},
             ]
 
             tool_results: list[dict] = []
             plot_paths: list[str] = []
-            max_iterations = 30  # safety cap
+            analysis_plan: str = ""
+            max_iterations = 40  # safety cap
+
+            # ----------------------------------------------------------------
+            # Phase 1: Force schema discovery first
+            # ----------------------------------------------------------------
+            schema_response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=openai_tools,
+                tool_choice={"type": "function", "function": {"name": "infer_schema"}},
+            )
+            schema_msg = schema_response.choices[0].message
+            messages.append(schema_msg.model_dump(exclude_unset=True))
+
+            # Execute the forced infer_schema call
+            if schema_msg.tool_calls:
+                tc = schema_msg.tool_calls[0]
+                fn_args = json.loads(tc.function.arguments)
+                mcp_result = await session.call_tool("infer_schema", fn_args)
+
+                result_text = "{}"
+                if mcp_result.content:
+                    first = mcp_result.content[0]
+                    if hasattr(first, "text") and first.text:
+                        result_text = first.text
+
+                try:
+                    result_dict = json.loads(result_text) if result_text.strip() else {}
+                except json.JSONDecodeError:
+                    result_dict = {"error": result_text}
+
+                tool_results.append({"tool": "infer_schema", "args": fn_args, "result": result_dict})
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
+
+            # ----------------------------------------------------------------
+            # Phase 2: Planning checkpoint — agent reasons before acting
+            # ----------------------------------------------------------------
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Based on this schema, reason about which analyses are most appropriate "
+                    "for this specific dataset and why. Consider: how many numeric vs categorical "
+                    "columns are there? Are there likely correlations? Are there categorical groupings "
+                    "worth exploring? Then state your concrete step-by-step plan, naming the exact "
+                    "tools and columns you will use."
+                ),
+            })
+
+            plan_response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tool_choice="none",  # reasoning only — no tool calls
+            )
+            plan_msg = plan_response.choices[0].message
+            analysis_plan = plan_msg.content or ""
+            messages.append(plan_msg.model_dump(exclude_unset=True))
+
+            # ----------------------------------------------------------------
+            # Phase 3: Execute the plan
+            # ----------------------------------------------------------------
+            messages.append({"role": "user", "content": "Good. Now execute your plan."})
 
             for _ in range(max_iterations):
                 response = client.chat.completions.create(
@@ -105,22 +163,17 @@ Be systematic and thorough. Do not skip columns."""
                     tool_choice="auto",
                 )
                 msg = response.choices[0].message
-
-                # Append assistant message to history
                 messages.append(msg.model_dump(exclude_unset=True))
 
-                # If no tool calls, the agent is done
                 if not msg.tool_calls:
                     break
 
-                # Execute each tool call via MCP
                 for tc in msg.tool_calls:
                     fn_name = tc.function.name
                     fn_args = json.loads(tc.function.arguments)
 
                     mcp_result = await session.call_tool(fn_name, fn_args)
 
-                    # Extract text from the first content block safely
                     result_text = "{}"
                     if mcp_result.content:
                         first = mcp_result.content[0]
@@ -134,22 +187,11 @@ Be systematic and thorough. Do not skip columns."""
                     except json.JSONDecodeError:
                         result_dict = {"error": result_text}
 
-                    # Collect plot paths separately
                     if "plot_path" in result_dict:
                         plot_paths.append(result_dict["plot_path"])
 
-                    tool_results.append({
-                        "tool": fn_name,
-                        "args": fn_args,
-                        "result": result_dict,
-                    })
-
-                    # Append tool result to message history
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": result_text,
-                    })
+                    tool_results.append({"tool": fn_name, "args": fn_args, "result": result_dict})
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
 
             # ----------------------------------------------------------------
             # Reporting Agent
@@ -183,6 +225,7 @@ Write the report in plain English, suitable for a non-technical audience."""
                 "tool_results": tool_results,
                 "plot_paths": plot_paths,
                 "narrative": narrative,
+                "analysis_plan": analysis_plan,
             }
 
 
@@ -207,7 +250,10 @@ if __name__ == "__main__":
     results = run_pipeline(csv_path, model)
 
     print("=" * 60)
-    print("TOOL CALLS EXECUTED:")
+    print("ANALYSIS PLAN:")
+    print(results["analysis_plan"])
+
+    print("\nTOOL CALLS EXECUTED:")
     for r in results["tool_results"]:
         print(f"  - {r['tool']}({r['args']})")
 
