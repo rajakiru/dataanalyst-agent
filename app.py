@@ -116,8 +116,13 @@ AVAILABLE_MODELS = [
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
-    st.title("AutoAnalyst")
-    st.caption("Multi-Agent CSV Analysis System")
+    st.markdown(
+        "<div style='padding: 0.5rem 0 0.25rem 0;'>"
+        "<span style='font-size:1.6rem; font-weight:800; color:#1C2B4A;'>AutoAnalyst</span><br>"
+        "<span style='font-size:0.8rem; color:#888; letter-spacing:0.05em;'>"
+        "MULTI-AGENT CSV ANALYSIS</span></div>",
+        unsafe_allow_html=True,
+    )
     st.divider()
 
     model = st.selectbox(
@@ -129,13 +134,13 @@ with st.sidebar:
 
     if "results" in st.session_state and "uploaded_filename" in st.session_state:
         st.divider()
-        st.markdown("**Downloads**")
+        st.caption("DOWNLOADS")
         _res = st.session_state["results"]
         _fname = st.session_state["uploaded_filename"]
 
         md_report = _build_markdown_report(_res, _fname)
         st.download_button(
-            label="Download Report (.md)",
+            label="Report (.md)",
             data=md_report,
             file_name=f"{os.path.splitext(_fname)[0]}_report.md",
             mime="text/markdown",
@@ -145,7 +150,7 @@ with st.sidebar:
         if _res.get("plot_paths"):
             zip_bytes = _build_plots_zip(_res["plot_paths"])
             st.download_button(
-                label="Download Plots (.zip)",
+                label="Plots (.zip)",
                 data=zip_bytes,
                 file_name=f"{os.path.splitext(_fname)[0]}_plots.zip",
                 mime="application/zip",
@@ -153,22 +158,42 @@ with st.sidebar:
             )
 
     st.divider()
-    st.markdown("**How it works**")
-    st.markdown(
-        "1. Upload a CSV\n"
-        "2. The **collection agent** infers schema and autonomously calls MCP tools\n"
-        "3. The **reporting agent** writes a narrative summary\n"
-        "4. Results appear in the tabs below"
-    )
+    st.caption("HOW IT WORKS")
+    for step, text in [
+        ("1", "Upload a CSV file"),
+        ("2", "Collection agent infers schema and calls MCP tools"),
+        ("3", "Quality agent audits the data"),
+        ("4", "Reporting agent writes a narrative summary"),
+        ("5", "Results appear across the tabs"),
+    ]:
+        st.markdown(
+            f"<div style='display:flex; gap:10px; align-items:flex-start; "
+            f"margin-bottom:8px; font-size:0.85rem;'>"
+            f"<span style='background:#5B8DEF; color:white; border-radius:50%; "
+            f"width:20px; height:20px; display:flex; align-items:center; "
+            f"justify-content:center; font-size:0.7rem; flex-shrink:0; "
+            f"margin-top:1px;'>{step}</span>"
+            f"<span style='color:#444; line-height:1.4;'>{text}</span></div>",
+            unsafe_allow_html=True,
+        )
 
 # ---------------------------------------------------------------------------
 # Main area
 # ---------------------------------------------------------------------------
 
-st.title("AutoAnalyst: Automated Multi-Agent Data Analysis")
-st.caption("Upload a CSV — the agent handles everything else.")
+st.markdown(
+    "<h1 style='font-size:2.4rem; font-weight:800; margin-bottom:0; line-height:1.2;'>"
+    "AutoAnalyst</h1>"
+    "<p style='font-size:1.1rem; color:#5B8DEF; font-weight:500; margin-top:4px;'>"
+    "Automated Multi-Agent Data Analysis</p>"
+    "<p style='font-size:0.92rem; color:#888; margin-top:2px; margin-bottom:1.5rem;'>"
+    "Upload a CSV — the agents handle schema inference, statistics, quality auditing, "
+    "and report writing automatically.</p>",
+    unsafe_allow_html=True,
+)
 
-uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
+st.markdown("**Upload your dataset**")
+uploaded_file = st.file_uploader("", type=["csv"], label_visibility="collapsed")
 
 if uploaded_file is not None:
     run_btn = st.button("Run Analysis", type="primary", use_container_width=True)
