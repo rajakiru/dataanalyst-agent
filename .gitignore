@@ -13,6 +13,9 @@ venv/
 # Generated outputs
 outputs/
 
+# Documentation (local analysis notes)
+DOCS_*.md
+
 # OS
 .DS_Store
 

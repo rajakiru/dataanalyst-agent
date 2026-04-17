@@ -6,3 +6,6 @@ seaborn
 scikit-learn
 streamlit
 python-dotenv
+pillow
+torch
+torchvision
