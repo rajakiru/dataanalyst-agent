@@ -1,15 +1,18 @@
-# AutoAnalyst: Multi-Agent Data Analysis System
+# AutoAnalyst: A Multi-Agent Data Cascade Debugger
 
-An automated data analysis pipeline using the **Model Context Protocol (MCP)**. Upload any CSV file and a multi-agent system autonomously runs statistical analysis, generates visualizations, detects anomalies, and produces a written report — no manual configuration needed.
+AutoAnalyst is an agent-driven system that automatically analyzes datasets, identifies data quality issues, explains their root causes, and proposes actionable fixes with measurable impact. The system uses a **Model Context Protocol (MCP)** architecture where a collection agent performs schema inference and statistical analysis, a diagnosis agent interprets issues (e.g., missingness, outliers, correlations), and an intervention agent suggests and simulates fixes (e.g., imputation, transformations). A reporting agent then summarizes findings in a structured dashboard.
+
+Unlike traditional AutoEDA tools that only surface insights, AutoAnalyst closes the loop by enabling users to understand, fix, and validate data issues — directly addressing **data cascades**, where unresolved upstream data problems silently degrade downstream AI systems.
 
 ---
 
 ## How It Works
 
 1. **Collection Agent** — reads the CSV, infers the schema, and decides which analysis tools to call
-2. **MCP Server** — exposes 6 analysis tools the agent can invoke via stdio transport
-3. **Reporting Agent** — takes all tool outputs and writes a narrative summary
-4. **Streamlit Dashboard** — displays everything in a tabbed UI
+2. **Diagnosis Agent** — interprets detected issues (missingness, outliers, type inconsistencies) and scores data quality
+3. **Intervention Agent** — proposes and simulates fixes (imputation, transformations, deduplication) with estimated impact
+4. **Reporting Agent** — takes all tool outputs and writes a narrative summary
+5. **Streamlit Dashboard** — HITL plan review + tabbed results UI
 
 ---
 
@@ -92,15 +95,19 @@ For a more complex test, try the **Titanic dataset**:
 ## Architecture
 
 ```
-app.py (Streamlit UI)
+app.py (Streamlit UI — HITL plan review + tabbed results)
     └── agent.py
-            ├── Collection Agent  ←→  Dedalus LLM API (OpenAI-compatible)
+            ├── Collection Agent   ←→  Dedalus LLM API (OpenAI-compatible)
             │       └── MCP Client (stdio)
-            │               └── mcp_server.py (6 tools)
-            └── Reporting Agent  ←→  Dedalus LLM API
+            │               └── mcp_server.py (analysis + quality tools)
+            ├── Diagnosis Agent    ←→  Dedalus LLM API
+            │       └── MCP Client → quality scoring + issue detection tools
+            ├── Intervention Agent ←→  Dedalus LLM API
+            │       └── MCP Client → fix recommendation + simulation tools
+            └── Reporting Agent    ←→  Dedalus LLM API
 ```
 
-Tools in `mcp_server.py`: `infer_schema`, `summarize_statistics`, `compute_correlations`, `detect_anomalies`, `plot_distribution`, `plot_correlation_heatmap`
+Tools in `mcp_server.py`: `infer_schema`, `summarize_statistics`, `compute_correlations`, `detect_anomalies`, `plot_distribution`, `plot_correlation_heatmap`, `compute_data_quality_score`, `detect_duplicates`, `plot_missing_heatmap`, `recommend_solutions`
 
 ---
 
