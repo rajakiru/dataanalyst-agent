@@ -680,6 +680,496 @@ def run_pipeline(csv_path: str, model: str = DEFAULT_MODEL, api_key: str = "", e
 
 
 # ---------------------------------------------------------------------------
+# Two-phase API: plan-only + execution (used by Streamlit for human-in-loop)
+# ---------------------------------------------------------------------------
+
+def _extract_planned_tools(plan_text: str, available_tools: list) -> list:
+    """Return tool names mentioned in the plan text (keyword match)."""
+    plan_lower = plan_text.lower()
+    return [t for t in available_tools if t in plan_lower or t.replace("_", " ") in plan_lower]
+
+
+async def _run_plan_phase_async(
+    csv_path: str,
+    model: str,
+    api_key: str = "",
+    source_type: str = "csv_dataset",
+    enabled_categories: frozenset | None = None,
+    on_event=None,
+) -> dict:
+    """Run schema inference + planning only. Returns state dict for user review."""
+    def emit(event: dict):
+        if on_event:
+            on_event(event)
+
+    server_params = StdioServerParameters(command=sys.executable, args=[MCP_SERVER_PATH], env=None)
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            emit({"type": "phase_start", "phase": "mcp_init"})
+
+            mcp_tools_response = await session.list_tools()
+            mcp_tools = mcp_tools_response.tools
+            openai_tools = [_mcp_tool_to_openai(t) for t in mcp_tools]
+            tool_descriptions = {t.name: t.description for t in mcp_tools}
+
+            _enabled = enabled_categories if enabled_categories is not None else _ALL_CATEGORIES
+            _collection_allowed = set(_ALWAYS_TOOLS)
+            if "visualizations" in _enabled:
+                _collection_allowed |= _VIZ_TOOLS
+            if "anomaly_detection" in _enabled:
+                _collection_allowed |= _ANOMALY_TOOLS
+            collection_tools = [t for t in openai_tools if t["function"]["name"] in _collection_allowed]
+            collection_tool_names = [t["function"]["name"] for t in collection_tools]
+
+            effective_key = api_key or OPENAI_API_KEY
+            client = OpenAI(api_key=effective_key, base_url=OPENAI_BASE_URL)
+
+            _image_rules = """
+IMAGE DATASET RULES (this CSV was derived from image feature extraction):
+- Columns named feature_0…feature_N are abstract CNN/histogram embeddings — NOT interpretable individually.
+- Do NOT run `plot_distribution` or `detect_anomalies` or `test_normality` on feature_N columns — they produce noise, not insight.
+- DO run `summarize_statistics`, `compute_correlations`, `plot_correlation_heatmap`, and `plot_pairplot` on ALL columns.
+- DO run `plot_distribution`, `detect_anomalies`, and `test_normality` on metadata columns only (filename, width_px, height_px, file_size_kb, aspect_ratio).
+- For `plot_boxplot`: use a metadata numeric column grouped by any categorical column if present.
+- Interpret findings in terms of image diversity, coverage gaps, and metadata anomalies.""" if source_type == "image_dataset" else ""
+
+            system_prompt = f"""You are an expert data analyst agent. You have access to tools that
+operate on CSV files. Your goal is to produce the most insightful analysis possible for the
+specific dataset you are given — not to blindly run every tool.
+
+The CSV file path for ALL tool calls is: {csv_path}
+
+DECISION RULES — apply these based on what you observe in the data:
+- Run `summarize_statistics` and `test_normality` for every numeric column found.
+- Run `compute_correlations`, `plot_correlation_heatmap`, and `plot_pairplot` ONLY if there are 2+ numeric columns.
+- Run `plot_scatter` ONLY for column pairs where |correlation| > 0.5.
+- Run `plot_boxplot` ONLY if there are both numeric columns and categorical columns with ≤15 unique values.
+- Run `plot_distribution` for every column (numeric or categorical).
+- Run `detect_anomalies` for every numeric column.
+- Do NOT call a tool that is irrelevant to this dataset's structure.
+
+VISUALIZATION BUDGET — generate at most 6 plots total. Quality over quantity.
+{_image_rules}
+You will first be asked to reason and plan. Then execute your plan."""
+
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"Please analyse this CSV file: {csv_path}"},
+            ]
+            tool_results: list[dict] = []
+
+            # Schema phase
+            emit({"type": "phase_start", "phase": "schema"})
+            schema_response = client.chat.completions.create(
+                model=model, messages=messages, tools=collection_tools,
+                tool_choice={"type": "function", "function": {"name": "infer_schema"}},
+            )
+            schema_msg = schema_response.choices[0].message
+            messages.append(schema_msg.model_dump(exclude_unset=True))
+
+            if schema_msg.tool_calls:
+                tc = schema_msg.tool_calls[0]
+                fn_args = json.loads(tc.function.arguments)
+                emit({"type": "tool_start", "tool": "infer_schema", "args": fn_args})
+                try:
+                    mcp_result = await session.call_tool("infer_schema", fn_args)
+                    result_text = "{}"
+                    if mcp_result.content:
+                        first = mcp_result.content[0]
+                        if hasattr(first, "text") and first.text:
+                            result_text = first.text
+                    try:
+                        result_dict = json.loads(result_text) if result_text.strip() else {}
+                    except json.JSONDecodeError:
+                        result_dict = {"error": result_text}
+                    tool_results.append({"tool": "infer_schema", "args": fn_args, "result": result_dict})
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
+                    emit({"type": "tool_result", "tool": "infer_schema", "result": result_dict})
+                except Exception as e:
+                    result_dict = {"error": str(e)}
+                    tool_results.append({"tool": "infer_schema", "args": fn_args, "result": result_dict})
+
+            # Planning phase
+            emit({"type": "phase_start", "phase": "planning"})
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Based on this schema, reason about which analyses are most appropriate "
+                    "for this specific dataset and why. Consider: how many numeric vs categorical "
+                    "columns are there? Are there likely correlations? Are there categorical groupings "
+                    "worth exploring? Then state your concrete step-by-step plan, naming the exact "
+                    "tools and columns you will use."
+                ),
+            })
+            plan_response = client.chat.completions.create(
+                model=model, messages=messages, tools=collection_tools, tool_choice="none",
+            )
+            plan_msg = plan_response.choices[0].message
+            analysis_plan = plan_msg.content or ""
+            messages.append(plan_msg.model_dump(exclude_unset=True))
+            emit({"type": "plan_ready", "text": analysis_plan})
+
+            planned_tools = _extract_planned_tools(analysis_plan, collection_tool_names)
+            schema_result = tool_results[0]["result"] if tool_results else {}
+
+            return {
+                "analysis_plan": analysis_plan,
+                "messages": messages,
+                "available_tool_names": collection_tool_names,
+                "planned_tool_names": planned_tools,
+                "schema_result": schema_result,
+                "tool_descriptions": tool_descriptions,
+                "enabled_categories": _enabled,
+                "csv_path": csv_path,
+                "source_type": source_type,
+            }
+
+
+async def _run_execution_async(
+    plan_state: dict,
+    approved_tools: list,
+    model: str,
+    api_key: str = "",
+    on_event=None,
+) -> dict:
+    """Run collection + quality + solutions + reporting given a plan state and approved tools."""
+    def emit(event: dict):
+        if on_event:
+            on_event(event)
+
+    csv_path = plan_state["csv_path"]
+    source_type = plan_state.get("source_type", "csv_dataset")
+    _enabled = plan_state.get("enabled_categories", _ALL_CATEGORIES)
+
+    outputs_dir = os.path.join(os.path.dirname(MCP_SERVER_PATH), "outputs")
+    for old_file in glob.glob(os.path.join(outputs_dir, "*.png")):
+        try:
+            os.remove(old_file)
+        except OSError:
+            pass
+
+    server_params = StdioServerParameters(command=sys.executable, args=[MCP_SERVER_PATH], env=None)
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            mcp_tools_response = await session.list_tools()
+            mcp_tools = mcp_tools_response.tools
+            all_openai_tools = [_mcp_tool_to_openai(t) for t in mcp_tools]
+            collection_tools = [t for t in all_openai_tools if t["function"]["name"] in approved_tools]
+
+            effective_key = api_key or OPENAI_API_KEY
+            client = OpenAI(api_key=effective_key, base_url=OPENAI_BASE_URL)
+
+            messages = list(plan_state["messages"])
+            analysis_plan = plan_state["analysis_plan"]
+            schema_result = plan_state.get("schema_result", {})
+
+            # Seed tool_results with schema from plan phase
+            tool_results: list[dict] = [{"tool": "infer_schema", "args": {}, "result": schema_result}]
+            plot_paths: list[str] = []
+
+            approved_str = ", ".join(approved_tools) if approved_tools else "none"
+            messages.append({
+                "role": "user",
+                "content": f"The user approved these tools: {approved_str}. Now execute your plan using only these approved tools.",
+            })
+
+            # Collection phase
+            emit({"type": "phase_start", "phase": "collection"})
+            for _ in range(40):
+                response = client.chat.completions.create(
+                    model=model, messages=messages,
+                    tools=collection_tools if collection_tools else all_openai_tools,
+                    tool_choice="auto",
+                )
+                msg = response.choices[0].message
+                messages.append(msg.model_dump(exclude_unset=True))
+                if not msg.tool_calls:
+                    break
+                for tc in msg.tool_calls:
+                    fn_name = tc.function.name
+                    fn_args = json.loads(tc.function.arguments)
+                    emit({"type": "tool_start", "tool": fn_name, "args": fn_args})
+                    mcp_result = await session.call_tool(fn_name, fn_args)
+                    result_text = "{}"
+                    if mcp_result.content:
+                        first = mcp_result.content[0]
+                        if hasattr(first, "text") and first.text and first.text.strip():
+                            result_text = first.text
+                        elif isinstance(first, dict):
+                            result_text = first.get("text", "{}")
+                    try:
+                        result_dict = json.loads(result_text) if result_text.strip() else {}
+                    except json.JSONDecodeError:
+                        result_dict = {"error": result_text}
+                    if "plot_path" in result_dict:
+                        plot_paths.append(result_dict["plot_path"])
+                    tool_results.append({"tool": fn_name, "args": fn_args, "result": result_dict})
+                    messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
+                    emit({"type": "tool_result", "tool": fn_name, "result": result_dict})
+
+            # Quality agent
+            quality_tool_results: list[dict] = []
+            quality_plot_paths: list[str] = []
+            quality_narrative: str = ""
+
+            if "data_quality" in _enabled:
+                schema_summary = json.dumps(schema_result, indent=2)
+                _quality_image_note = """
+IMAGE DATASET NOTE: Columns named feature_0…feature_N are abstract embeddings — non-normality
+in these columns is structurally expected, not a data quality issue. Do NOT run `plot_qq` on
+feature_N columns. Only run `plot_qq` on human-interpretable metadata columns.""" if source_type == "image_dataset" else ""
+
+                quality_system_prompt = f"""You are a data quality auditor agent. Your job is to thoroughly
+assess the quality of a CSV dataset and identify issues that could affect downstream analysis or
+machine learning pipelines.
+
+The CSV file path for ALL tool calls is: {csv_path}
+
+You have access to four quality-focused tools:
+- `compute_data_quality_score`: Always call this first — it gives you a structured quality breakdown.
+- `detect_duplicates`: Always call this to check for duplicate rows.
+- `plot_missing_heatmap`: Call this only if the quality score reveals missing values.
+- `plot_qq`: Call this for each numeric column to visually assess normality deviations.
+{_quality_image_note}
+Be thorough. After running all relevant tools, stop and provide a concise quality summary."""
+
+                quality_messages = [
+                    {"role": "system", "content": quality_system_prompt},
+                    {"role": "user", "content": f"Please audit the data quality of this dataset.\n\nSchema:\n{schema_summary}"},
+                ]
+
+                emit({"type": "phase_start", "phase": "quality_score"})
+                dq_response = client.chat.completions.create(
+                    model=model, messages=quality_messages, tools=all_openai_tools,
+                    tool_choice={"type": "function", "function": {"name": "compute_data_quality_score"}},
+                )
+                dq_msg = dq_response.choices[0].message
+                quality_messages.append(dq_msg.model_dump(exclude_unset=True))
+                if dq_msg.tool_calls:
+                    tc = dq_msg.tool_calls[0]
+                    fn_args = json.loads(tc.function.arguments)
+                    emit({"type": "tool_start", "tool": "compute_data_quality_score", "args": fn_args})
+                    mcp_result = await session.call_tool("compute_data_quality_score", fn_args)
+                    result_text = "{}"
+                    if mcp_result.content:
+                        first = mcp_result.content[0]
+                        if hasattr(first, "text") and first.text:
+                            result_text = first.text
+                    try:
+                        result_dict = json.loads(result_text)
+                    except json.JSONDecodeError:
+                        result_dict = {"error": result_text}
+                    quality_tool_results.append({"tool": "compute_data_quality_score", "args": fn_args, "result": result_dict})
+                    quality_messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
+                    emit({"type": "tool_result", "tool": "compute_data_quality_score", "result": result_dict})
+
+                n_cols = schema_result.get("shape", {}).get("cols", 10)
+                quality_iter_cap = max(20, n_cols * 2 + 5)
+                emit({"type": "phase_start", "phase": "quality_tools"})
+                for _ in range(quality_iter_cap):
+                    dq_response = client.chat.completions.create(
+                        model=model, messages=quality_messages, tools=all_openai_tools, tool_choice="auto",
+                    )
+                    dq_msg = dq_response.choices[0].message
+                    quality_messages.append(dq_msg.model_dump(exclude_unset=True))
+                    if not dq_msg.tool_calls:
+                        break
+                    for tc in dq_msg.tool_calls:
+                        fn_name = tc.function.name
+                        fn_args = json.loads(tc.function.arguments)
+                        emit({"type": "tool_start", "tool": fn_name, "args": fn_args})
+                        mcp_result = await session.call_tool(fn_name, fn_args)
+                        result_text = "{}"
+                        if mcp_result.content:
+                            first = mcp_result.content[0]
+                            if hasattr(first, "text") and first.text and first.text.strip():
+                                result_text = first.text
+                            elif isinstance(first, dict):
+                                result_text = first.get("text", "{}")
+                        try:
+                            result_dict = json.loads(result_text)
+                        except json.JSONDecodeError:
+                            result_dict = {"error": result_text}
+                        if "plot_path" in result_dict:
+                            quality_plot_paths.append(result_dict["plot_path"])
+                        quality_tool_results.append({"tool": fn_name, "args": fn_args, "result": result_dict})
+                        quality_messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_text})
+                        emit({"type": "tool_result", "tool": fn_name, "result": result_dict})
+
+                emit({"type": "phase_start", "phase": "quality_narrative"})
+                quality_context = json.dumps(
+                    [{"tool": r["tool"], "result": r["result"]} for r in quality_tool_results], indent=2,
+                )
+                quality_report_response = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": (
+                        f"Based on these data quality audit results, write a concise quality report (2-3 paragraphs). "
+                        f"Cover: the overall quality score and what it means, specific issues found and their severity, "
+                        f"and concrete recommendations for fixing each issue.\n\nResults:\n{quality_context}"
+                    )}],
+                )
+                quality_narrative = quality_report_response.choices[0].message.content
+
+            # Solutions agent
+            solutions_tool_results: list[dict] = []
+            solutions_narrative: str = ""
+
+            if "solutions" in _enabled:
+                detected_issues = []
+                for qr in quality_tool_results:
+                    if qr["tool"] == "compute_data_quality_score":
+                        for issue_dict in qr["result"].get("issues", []):
+                            detected_issues.append({
+                                "column": issue_dict.get("column", "—"),
+                                "issue_type": _map_issue_string_to_type(issue_dict.get("issue", "")),
+                                "severity": issue_dict.get("severity", "medium"),
+                                "details": {"issue_description": issue_dict.get("issue", "")},
+                            })
+                    elif qr["tool"] == "detect_anomalies":
+                        result = qr["result"]
+                        if not result.get("error") and result.get("outlier_pct", 0) > 0:
+                            detected_issues.append({
+                                "column": result.get("column", "unknown"),
+                                "issue_type": "outliers",
+                                "severity": "high" if result.get("outlier_pct", 0) > 5 else "medium",
+                                "details": {"outlier_pct": result.get("outlier_pct", 0)},
+                            })
+                    elif qr["tool"] == "test_normality":
+                        result = qr["result"]
+                        if result.get("is_normal") is False:
+                            detected_issues.append({
+                                "column": result.get("column", "unknown"),
+                                "issue_type": "non_normal",
+                                "severity": "medium",
+                                "details": {"p_value": result.get("p_value", 0.05)},
+                            })
+                    elif qr["tool"] == "detect_duplicates":
+                        result = qr["result"]
+                        if result.get("duplicate_rows", 0) > 0:
+                            detected_issues.append({
+                                "column": "—",
+                                "issue_type": "duplicates",
+                                "severity": "medium",
+                                "details": {"duplicate_pct": result.get("duplicate_pct", 0)},
+                            })
+                for ar in tool_results:
+                    if ar["tool"] == "compute_correlations":
+                        for corr_pair in ar["result"].get("top_correlations", []):
+                            if abs(corr_pair.get("correlation", 0)) > 0.9:
+                                detected_issues.append({
+                                    "column": corr_pair.get("col1", "unknown"),
+                                    "issue_type": "multicollinearity",
+                                    "severity": "medium",
+                                    "details": {"correlation": corr_pair.get("correlation", 0.9), "correlated_with": corr_pair.get("col2", "unknown")},
+                                })
+
+                valid_issues = [i for i in detected_issues if isinstance(i, dict) and "issue_type" in i]
+                if valid_issues:
+                    emit({"type": "phase_start", "phase": "solutions"})
+                    _modality_note = (
+                        "\n\nIMPORTANT: This dataset was derived from images. Focus solutions on dataset-level issues "
+                        "(duplicates, coverage gaps, class imbalance) rather than per-feature imputation."
+                        if source_type == "image_dataset" else ""
+                    )
+                    sol_response = client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "user", "content": (
+                            f"You are a data remediation expert. Based on these detected issues, generate a concise, "
+                            f"actionable remediation plan (2-3 paragraphs). Prioritize high-severity issues first, "
+                            f"and suggest a cleaning order.{_modality_note}\n\n"
+                            f"Issues ({len(valid_issues)} total):\n{json.dumps(valid_issues[:20], indent=2)}"
+                        )}],
+                    )
+                    solutions_narrative = sol_response.choices[0].message.content
+                    sol_tool_response = await session.call_tool(
+                        "recommend_solutions", {"csv_path": csv_path, "issues": valid_issues[:100]},
+                    )
+                    sol_text = "{}"
+                    if sol_tool_response.content:
+                        first = sol_tool_response.content[0]
+                        if hasattr(first, "text") and first.text:
+                            sol_text = first.text
+                    try:
+                        sol_dict = json.loads(sol_text)
+                    except json.JSONDecodeError:
+                        sol_dict = {"error": "Failed to parse solutions response"}
+                    solutions_tool_results.append({"tool": "recommend_solutions", "result": sol_dict})
+                    emit({"type": "tool_result", "tool": "recommend_solutions", "result": sol_dict})
+
+            # Reporting agent
+            emit({"type": "phase_start", "phase": "reporting"})
+            context = json.dumps(
+                [{"tool": r["tool"], "result": r["result"]} for r in tool_results], indent=2,
+            )
+            _report_modality = (
+                "\nNOTE: This dataset was produced by extracting features from images. "
+                "Interpret findings in terms of image diversity and visual consistency."
+                if source_type == "image_dataset" else ""
+            )
+            report_response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": (
+                    f"You are a data science reporting agent. Write a clear, insightful report (3-5 paragraphs) covering: "
+                    f"1. Dataset overview, 2. Key statistics and distributions, 3. Important correlations, "
+                    f"4. Anomalies detected, 5. Data quality assessment and recommendations."
+                    f"{_report_modality}\n\nAnalysis results:\n{context}\n\n"
+                    f"Write in plain English for a non-technical audience."
+                )}],
+            )
+            narrative = report_response.choices[0].message.content
+
+            return {
+                "tool_results": tool_results,
+                "plot_paths": plot_paths,
+                "narrative": narrative,
+                "analysis_plan": analysis_plan,
+                "quality_tool_results": quality_tool_results,
+                "quality_plot_paths": quality_plot_paths,
+                "quality_narrative": quality_narrative,
+                "solutions_tool_results": solutions_tool_results,
+                "solutions_narrative": solutions_narrative,
+                "source_type": source_type,
+            }
+
+
+def run_plan_only(
+    csv_path: str,
+    model: str = DEFAULT_MODEL,
+    api_key: str = "",
+    enabled_categories: frozenset | None = None,
+    on_event=None,
+) -> dict:
+    """Run schema + planning phase only. Returns plan_state dict for user review."""
+    processed_csv_path, image_metadata = _detect_and_process_images(csv_path, model, api_key)
+    source_type = "image_dataset" if image_metadata else "csv_dataset"
+    plan_state = asyncio.run(_run_plan_phase_async(
+        processed_csv_path, model, api_key, source_type, enabled_categories, on_event,
+    ))
+    if image_metadata:
+        plan_state["image_processing_metadata"] = image_metadata
+    return plan_state
+
+
+def run_execution_phase(
+    plan_state: dict,
+    approved_tools: list,
+    model: str = DEFAULT_MODEL,
+    api_key: str = "",
+    on_event=None,
+) -> dict:
+    """Run collection + quality + solutions + reporting with user-approved tools."""
+    result = asyncio.run(_run_execution_async(plan_state, approved_tools, model, api_key, on_event))
+    if plan_state.get("image_processing_metadata"):
+        result["image_processing_metadata"] = plan_state["image_processing_metadata"]
+    return result
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point for quick testing
 # ---------------------------------------------------------------------------
 

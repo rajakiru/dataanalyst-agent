@@ -33,7 +33,7 @@ def _find_image_dir(base_dir: str) -> str:
             return sub
     return base_dir  # fallback — let agent produce a clear error
 
-from agent import DEFAULT_MODEL, run_pipeline
+from agent import DEFAULT_MODEL, run_pipeline, run_plan_only, run_execution_phase
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -180,6 +180,122 @@ AVAILABLE_MODELS = [
 ]
 
 # ---------------------------------------------------------------------------
+# Sample datasets shipped with the repo
+# ---------------------------------------------------------------------------
+_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+SAMPLE_DATASETS = {
+    "Iris (clean)":      os.path.join(_DATA_DIR, "iris.csv"),
+    "Iris (corrupted)":  os.path.join(_DATA_DIR, "iris_corrupted.csv"),
+    "Titanic":           os.path.join(os.path.dirname(__file__), "Titanic-Dataset.csv"),
+    "Titanic (corrupted)": os.path.join(_DATA_DIR, "titanic_corrupted.csv"),
+}
+
+# ---------------------------------------------------------------------------
+# Timeline rendering helpers
+# ---------------------------------------------------------------------------
+
+PHASE_LABELS = {
+    "mcp_init":          "MCP server started",
+    "schema":            "Inferring schema",
+    "planning":          "Planning analysis",
+    "collection":        "Running collection agent",
+    "quality_score":     "Quality audit — scoring",
+    "quality_tools":     "Quality audit — checks",
+    "quality_narrative": "Quality agent writing report",
+    "solutions":         "Solutions agent",
+    "reporting":         "Reporting agent",
+}
+
+# Quality/solutions tools always run — not shown in user checklist
+_ALWAYS_ON_TOOLS = {
+    "compute_data_quality_score", "detect_duplicates",
+    "plot_missing_heatmap", "plot_qq", "recommend_solutions",
+    "infer_schema",
+}
+
+
+def _fmt_tool(tool: str, args: dict) -> str:
+    col = args.get("column") or args.get("numeric_column") or args.get("x_column")
+    return f"{tool}({col})" if col else tool
+
+
+def _fmt_result(tool: str, result: dict) -> str:
+    if "error" in result:
+        return f"error: {str(result['error'])[:60]}"
+    if tool == "infer_schema":
+        s = result.get("shape", {})
+        return f"{s.get('rows','?')} rows × {s.get('cols','?')} cols"
+    if tool == "summarize_statistics":
+        return f"stats for {len(result.get('statistics', {}))} column(s)"
+    if tool == "compute_correlations":
+        top = result.get("top_correlations", [])
+        if top:
+            t = top[0]
+            return f"top: {t['col1']}/{t['col2']} r={t['correlation']}"
+        return "no correlations"
+    if tool == "detect_anomalies":
+        return f"{result.get('outlier_count', 0)} outliers ({result.get('outlier_pct', 0)}%)"
+    if tool == "compute_data_quality_score":
+        return f"score: {result.get('overall_score', '?')} / 100"
+    if tool == "detect_duplicates":
+        return f"{result.get('duplicate_rows', 0)} duplicate rows"
+    if "plot_path" in result:
+        return f"saved {os.path.basename(result['plot_path'])}"
+    return "done"
+
+
+class TimelineRenderer:
+    def __init__(self, status):
+        self._status = status
+        self._phase_slots: dict = {}
+        self._tool_slots: dict = {}
+        self._active_phase: str | None = None
+        self._tool_counts: dict = {}
+
+    def on_event(self, event: dict):
+        t = event["type"]
+        if t == "phase_start":
+            if self._active_phase:
+                self._close_phase(self._active_phase)
+            phase = event["phase"]
+            self._active_phase = phase
+            self._tool_counts[phase] = 0
+            label = PHASE_LABELS.get(phase, phase)
+            slot = self._status.empty()
+            self._phase_slots[phase] = slot
+            slot.markdown(f"**⏳ {label}**")
+        elif t == "tool_start":
+            phase = self._active_phase
+            idx = self._tool_counts.get(phase, 0)
+            slot = self._status.empty()
+            self._tool_slots[(phase, idx)] = slot
+            slot.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;⏳ `{_fmt_tool(event['tool'], event.get('args', {}))}`")
+        elif t == "tool_result":
+            phase = self._active_phase
+            idx = self._tool_counts.get(phase, 0)
+            slot = self._tool_slots.get((phase, idx))
+            if slot:
+                slot.markdown(f"&nbsp;&nbsp;&nbsp;&nbsp;✅ `{_fmt_tool(event['tool'], {})}` — {_fmt_result(event['tool'], event['result'])}")
+            self._tool_counts[phase] = idx + 1
+        elif t == "plan_ready":
+            slot = self._phase_slots.get("planning")
+            if slot:
+                slot.markdown("**✅ Planning complete**")
+
+    def _close_phase(self, phase: str):
+        slot = self._phase_slots.get(phase)
+        if not slot:
+            return
+        label = PHASE_LABELS.get(phase, phase)
+        n = self._tool_counts.get(phase, 0)
+        suffix = f" ({n} tools)" if n else ""
+        slot.markdown(f"**✅ {label}{suffix}**")
+
+    def finalize(self):
+        if self._active_phase:
+            self._close_phase(self._active_phase)
+
+# ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
 
@@ -262,47 +378,65 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown("**Upload your dataset**")
-st.caption("CSV file — or a ZIP archive containing images (JPEG/PNG/etc.)")
-uploaded_file = st.file_uploader("", type=["csv", "zip"], label_visibility="collapsed")
+# ---------------------------------------------------------------------------
+# Step management
+# ---------------------------------------------------------------------------
 
-if uploaded_file is not None:
-    with st.expander("Analysis options", expanded=False):
-        st.caption("Schema & Stats is always run. Toggle the others to control scope.")
-        st.text("Schema & Stats — always on", )
-        run_viz      = st.checkbox("Visualizations",         value=True, key="opt_viz")
-        run_anomaly  = st.checkbox("Anomaly Detection",      value=True, key="opt_anomaly")
-        run_quality  = st.checkbox("Data Quality Audit",     value=True, key="opt_quality")
-        run_solutions = st.checkbox("Solutions & Remediation", value=True, key="opt_solutions")
+def _leaf_exceptions(exc):
+    causes = getattr(exc, "exceptions", None)
+    if causes:
+        return [leaf for inner in causes for leaf in _leaf_exceptions(inner)]
+    return [exc]
 
-    run_btn = st.button("Run Analysis", type="primary", use_container_width=True)
 
-    if run_btn:
-        # Clear any previous results and HITL state so stale data never bleeds into the new run
-        for key in ("results", "uploaded_filename", "dismissed_issues", "selected_solutions"):
-            st.session_state.pop(key, None)
+def _reset():
+    for key in ("step", "plan_state", "results", "uploaded_filename",
+                "dismissed_issues", "selected_solutions", "csv_path",
+                "tmp_image_dir", "enabled_categories"):
+        st.session_state.pop(key, None)
 
-        tmp_path = None
-        tmp_image_dir = None
 
-        try:
-            if uploaded_file.name.lower().endswith(".zip"):
-                # Guard: reject oversized ZIPs before extracting
-                zip_mb = len(uploaded_file.getvalue()) / (1024 * 1024)
-                if zip_mb > _MAX_ZIP_MB:
-                    st.error(f"ZIP file is {zip_mb:.0f} MB — maximum allowed is {_MAX_ZIP_MB} MB.")
-                    st.stop()
+if "step" not in st.session_state:
+    st.session_state["step"] = "upload"
 
-                # Extract ZIP; handle nested folder layout transparently
-                tmp_image_dir = tempfile.mkdtemp()
-                with zipfile.ZipFile(io.BytesIO(uploaded_file.getvalue())) as zf:
-                    zf.extractall(tmp_image_dir)
-                pipeline_input = _find_image_dir(tmp_image_dir)
-            else:
-                with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
-                    tmp.write(uploaded_file.getvalue())
-                    tmp_path = tmp.name
-                pipeline_input = tmp_path
+# ===========================================================================
+# Step: upload
+# ===========================================================================
+if st.session_state["step"] == "upload":
+    st.markdown("**Upload your dataset**")
+    st.caption("CSV file — or a ZIP archive containing images (JPEG/PNG/etc.)")
+    uploaded_file = st.file_uploader("Upload file", type=["csv", "zip"], label_visibility="collapsed")
+
+    # Sample dataset picker
+    st.caption("Or try a sample dataset:")
+    sample_cols = st.columns(len(SAMPLE_DATASETS))
+    for idx, (label, path) in enumerate(SAMPLE_DATASETS.items()):
+        file_exists = os.path.exists(path)
+        if sample_cols[idx].button(
+            label,
+            use_container_width=True,
+            disabled=not file_exists,
+            help=None if file_exists else "Run data/generate_corrupted.py to create this dataset",
+        ):
+            _reset()
+            st.session_state["csv_path"] = path
+            st.session_state["uploaded_filename"] = os.path.basename(path)
+            st.session_state["use_sample"] = True
+            uploaded_file = None  # prevent double-trigger
+
+    if uploaded_file is not None or st.session_state.get("use_sample"):
+        with st.expander("Analysis options", expanded=False):
+            st.caption("Schema & Stats is always run. Toggle the others to control scope.")
+            st.text("Schema & Stats — always on")
+            run_viz       = st.checkbox("Visualizations",           value=True, key="opt_viz")
+            run_anomaly   = st.checkbox("Anomaly Detection",        value=True, key="opt_anomaly")
+            run_quality   = st.checkbox("Data Quality Audit",       value=True, key="opt_quality")
+            run_solutions = st.checkbox("Solutions & Remediation",  value=True, key="opt_solutions")
+
+        if st.button("Analyse", type="primary", use_container_width=True):
+            # Clear previous run state
+            for key in ("plan_state", "results", "dismissed_issues", "selected_solutions"):
+                st.session_state.pop(key, None)
 
             enabled = frozenset(filter(None, [
                 "visualizations"    if run_viz       else None,
@@ -310,34 +444,159 @@ if uploaded_file is not None:
                 "data_quality"      if run_quality   else None,
                 "solutions"         if run_solutions else None,
             ]))
-            with st.spinner("Agents working... this may take a minute."):
-                results = run_pipeline(pipeline_input, model=model, enabled_categories=enabled)
-        except Exception as e:
-            # Recursively unwrap nested ExceptionGroups (from asyncio TaskGroup)
-            def _leaf_exceptions(exc):
-                causes = getattr(exc, "exceptions", None)
-                if causes:
-                    return [leaf for inner in causes for leaf in _leaf_exceptions(inner)]
-                return [exc]
-            for leaf in _leaf_exceptions(e):
-                st.error(f"Pipeline failed: {type(leaf).__name__}: {leaf}")
-            st.stop()
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-            if tmp_image_dir:
-                shutil.rmtree(tmp_image_dir, ignore_errors=True)
+            st.session_state["enabled_categories"] = enabled
 
-        # Store results in session state so tabs can access them
-        st.session_state["results"] = results
-        st.session_state["uploaded_filename"] = uploaded_file.name
+            # Resolve input path
+            if not st.session_state.get("use_sample"):
+                tmp_image_dir = None
+                if uploaded_file.name.lower().endswith(".zip"):
+                    zip_mb = len(uploaded_file.getvalue()) / (1024 * 1024)
+                    if zip_mb > _MAX_ZIP_MB:
+                        st.error(f"ZIP file is {zip_mb:.0f} MB — maximum allowed is {_MAX_ZIP_MB} MB.")
+                        st.stop()
+                    tmp_image_dir = tempfile.mkdtemp()
+                    with zipfile.ZipFile(io.BytesIO(uploaded_file.getvalue())) as zf:
+                        zf.extractall(tmp_image_dir)
+                    csv_path = _find_image_dir(tmp_image_dir)
+                    st.session_state["tmp_image_dir"] = tmp_image_dir
+                else:
+                    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+                        tmp.write(uploaded_file.getvalue())
+                        csv_path = tmp.name
+                st.session_state["csv_path"] = csv_path
+                st.session_state["uploaded_filename"] = uploaded_file.name
 
-# Render results if available
-if "results" in st.session_state:
+            st.session_state.pop("use_sample", None)
+
+            # Run plan phase with live timeline
+            try:
+                with st.status("Planning analysis...", expanded=True) as _status:
+                    _renderer = TimelineRenderer(_status)
+                    plan_state = run_plan_only(
+                        st.session_state["csv_path"],
+                        model=model,
+                        enabled_categories=enabled,
+                        on_event=_renderer.on_event,
+                    )
+                    _renderer.finalize()
+                    _status.update(label="Plan ready — review below", state="complete", expanded=False)
+            except Exception as e:
+                for leaf in _leaf_exceptions(e):
+                    st.error(f"Planning failed: {type(leaf).__name__}: {leaf}")
+                st.stop()
+
+            st.session_state["plan_state"] = plan_state
+            st.session_state["step"] = "review_plan"
+            st.rerun()
+
+# ===========================================================================
+# Step: review_plan
+# ===========================================================================
+elif st.session_state["step"] == "review_plan":
+    plan_state = st.session_state["plan_state"]
+    analysis_plan = plan_state["analysis_plan"]
+    available_tools = [t for t in plan_state["available_tool_names"] if t not in _ALWAYS_ON_TOOLS]
+    planned_tools = [t for t in plan_state.get("planned_tool_names", []) if t not in _ALWAYS_ON_TOOLS]
+    tool_descriptions = plan_state.get("tool_descriptions", {})
+
+    st.subheader("Agent's Analysis Plan")
+    st.markdown(analysis_plan)
+    st.divider()
+
+    st.subheader("Select tools to run")
+    st.caption("Pre-checked based on the agent's plan. Uncheck tools to skip them. Quality audit and solutions always run.")
+
+    approved = []
+    tool_cols = st.columns(2)
+    for i, tool in enumerate(available_tools):
+        default = tool in planned_tools
+        desc = tool_descriptions.get(tool, "")
+        # Show first sentence of description as a short label
+        short_desc = desc.split(".")[0] if desc else ""
+        checked = tool_cols[i % 2].checkbox(
+            f"**{tool}**",
+            value=default,
+            key=f"tool_{tool}",
+            help=desc if desc else None,
+        )
+        if short_desc:
+            tool_cols[i % 2].caption(f"↳ {short_desc}")
+        if checked:
+            approved.append(tool)
+
+    st.divider()
+    col_run, col_back = st.columns([3, 1])
+    run_clicked = col_run.button(
+        "Run Analysis", type="primary", use_container_width=True, disabled=len(approved) == 0,
+    )
+    if col_back.button("← Start over", use_container_width=True):
+        _csv = st.session_state.pop("csv_path", None)
+        if _csv and os.path.exists(_csv) and _csv != st.session_state.get("csv_path"):
+            try:
+                os.unlink(_csv)
+            except OSError:
+                pass
+        _tmp_dir = st.session_state.pop("tmp_image_dir", None)
+        if _tmp_dir:
+            shutil.rmtree(_tmp_dir, ignore_errors=True)
+        _reset()
+        st.rerun()
+
+    if run_clicked:
+        st.session_state["approved_tools"] = approved
+        st.session_state["step"] = "running"
+        st.rerun()
+
+# ===========================================================================
+# Step: running
+# ===========================================================================
+elif st.session_state["step"] == "running":
+    plan_state = st.session_state["plan_state"]
+    approved_tools = st.session_state["approved_tools"]
+
+    try:
+        with st.status("Running analysis...", expanded=True) as _status:
+            _renderer = TimelineRenderer(_status)
+            results = run_execution_phase(
+                plan_state,
+                approved_tools,
+                model=model,
+                on_event=_renderer.on_event,
+            )
+            _renderer.finalize()
+            _status.update(label="Analysis complete ✓", state="complete", expanded=False)
+    except Exception as e:
+        for leaf in _leaf_exceptions(e):
+            st.error(f"Pipeline failed: {type(leaf).__name__}: {leaf}")
+        st.stop()
+    finally:
+        _csv = st.session_state.get("csv_path", "")
+        # Only delete temp files, not sample datasets
+        if _csv and os.path.exists(_csv) and _csv not in SAMPLE_DATASETS.values():
+            try:
+                os.unlink(_csv)
+            except OSError:
+                pass
+        _tmp_dir = st.session_state.pop("tmp_image_dir", None)
+        if _tmp_dir:
+            shutil.rmtree(_tmp_dir, ignore_errors=True)
+
+    st.session_state["results"] = results
+    st.session_state["step"] = "complete"
+    st.rerun()
+
+# ===========================================================================
+# Step: complete — show results
+# ===========================================================================
+if st.session_state.get("step") == "complete" and "results" in st.session_state:
     results = st.session_state["results"]
     tool_results = results["tool_results"]
     plot_paths = results["plot_paths"]
     narrative = results["narrative"]
+
+    if st.button("← New analysis", use_container_width=False):
+        _reset()
+        st.rerun()
 
     # Build lookup by tool name for easy access
     by_tool: dict = {}
