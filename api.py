@@ -16,7 +16,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from agent import run_plan_only, run_execution_phase, DEFAULT_MODEL
+from agent import (
+    _detect_and_process_images,
+    _run_plan_phase_async,
+    _run_execution_async,
+    DEFAULT_MODEL,
+)
 
 app = FastAPI(title="AutoAnalyst API")
 
@@ -35,8 +40,8 @@ SAMPLE_PATHS = {
     "titanic_corrupted":  DATA_DIR / "titanic_corrupted.csv",
 }
 
-API_KEY = os.getenv("DEDALUS_API_KEY", "")
-MODEL   = os.getenv("DEFAULT_MODEL", DEFAULT_MODEL)
+API_KEY = os.getenv("OPENAI_API_KEY", "")
+MODEL   = os.getenv("DEFAULT_MODEL", "gpt-4o-mini")
 
 
 def _serialize_plan_state(plan_state: dict) -> dict:
@@ -106,7 +111,11 @@ async def plan(
         raise HTTPException(400, "Provide a file upload or a valid sample name")
 
     try:
-        plan_state = run_plan_only(csv_path=csv_path, model=MODEL, api_key=API_KEY)
+        processed_path, image_metadata = _detect_and_process_images(csv_path, MODEL, API_KEY)
+        source_type = "image_dataset" if image_metadata else "csv_dataset"
+        plan_state = await _run_plan_phase_async(processed_path, MODEL, API_KEY, source_type)
+        if image_metadata:
+            plan_state["image_processing_metadata"] = image_metadata
     finally:
         if cleanup:
             os.unlink(csv_path)
@@ -126,7 +135,7 @@ class ExecuteRequest(BaseModel):
 @app.post("/execute")
 async def execute(req: ExecuteRequest):
     plan_state = _deserialize_plan_state(req.plan_state)
-    results = run_execution_phase(
+    results = await _run_execution_async(
         plan_state=plan_state,
         approved_tools=req.approved_tools,
         model=MODEL,
@@ -147,8 +156,7 @@ class ChatRequest(BaseModel):
 @app.post("/chat")
 async def chat(req: ChatRequest):
     from openai import OpenAI
-    base_url = os.getenv("DEDALUS_BASE_URL", "https://api.dedaluslabs.ai/v1")
-    client = OpenAI(api_key=API_KEY, base_url=base_url)
+    client = OpenAI(api_key=API_KEY)
 
     system = (
         "You are a data analysis assistant for the AutoAnalyst system. "
