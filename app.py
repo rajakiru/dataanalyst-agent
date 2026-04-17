@@ -4,11 +4,34 @@ Streamlit web UI for the automated data analysis system.
 
 import io
 import os
+import shutil
 import tempfile
 import zipfile
 
 import streamlit as st
 from PIL import Image
+
+_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
+_MAX_ZIP_MB = 500
+
+
+def _find_image_dir(base_dir: str) -> str:
+    """Return the directory actually containing images after ZIP extraction.
+
+    ZIPs created by compressing a folder extract as base_dir/foldername/images.
+    We check one level deep so both layouts work transparently.
+    """
+    if any(os.path.splitext(f)[1].lower() in _IMAGE_EXTENSIONS
+           for f in os.listdir(base_dir)):
+        return base_dir
+    for entry in os.listdir(base_dir):
+        sub = os.path.join(base_dir, entry)
+        if os.path.isdir(sub) and any(
+            os.path.splitext(f)[1].lower() in _IMAGE_EXTENSIONS
+            for f in os.listdir(sub)
+        ):
+            return sub
+    return base_dir  # fallback — let agent produce a clear error
 
 from agent import DEFAULT_MODEL, run_pipeline
 
@@ -22,8 +45,12 @@ st.set_page_config(
     layout="wide",
 )
 
-def _build_markdown_report(results: dict, filename: str) -> str:
-    """Compose a self-contained markdown report from pipeline results."""
+def _build_markdown_report(results: dict, filename: str, selected_solutions: set | None = None) -> str:
+    """Compose a self-contained markdown report from pipeline results.
+
+    selected_solutions: set of action keys (col|issue_type|action_name) to include.
+    None means include everything (pre-HITL behaviour).
+    """
     parts = [f"# AutoAnalyst Report: {filename}\n"]
 
     plan = results.get("analysis_plan", "")
@@ -88,6 +115,47 @@ def _build_markdown_report(results: dict, filename: str) -> str:
         parts.append("\n## Quality Agent's Assessment\n")
         parts.append(quality_narrative + "\n")
 
+    # Solutions section
+    solutions_narrative = results.get("solutions_narrative", "")
+    if solutions_narrative:
+        parts.append("\n## Remediation Recommendations\n")
+        parts.append(solutions_narrative + "\n")
+        
+        solutions_tool_results = results.get("solutions_tool_results", [])
+        for tool_result in solutions_tool_results:
+            if tool_result["tool"] == "recommend_solutions":
+                recs = tool_result["result"]
+                recommendations = recs.get("recommendations", [])
+                if recommendations:
+                    parts.append("\n### Detailed Solutions by Issue\n")
+                    for rec in recommendations:
+                        col_name = rec.get("column", "—")
+                        issue_type = rec.get("issue_type", "unknown")
+                        severity = rec.get("severity", "medium")
+                        actions = rec.get("actions", [])
+
+                        # Filter to selected actions when caller provides a set
+                        if selected_solutions is not None:
+                            actions = [
+                                a for a in actions
+                                if f"{col_name}|{issue_type}|{a.get('action', '')}" in selected_solutions
+                            ]
+                        if not actions:
+                            continue
+
+                        parts.append(f"\n#### {col_name} — {issue_type} [{severity}]\n")
+
+                        for action in actions:
+                            priority = action.get("priority", "medium").upper()
+                            action_name = action.get("action", "")
+                            rationale = action.get("rationale", "")
+                            implementation = action.get("implementation", "")
+
+                            parts.append(f"\n**[{priority}]** {action_name}\n\n")
+                            parts.append(f"_Rationale:_ {rationale}\n\n")
+                            if implementation:
+                                parts.append(f"```python\n{implementation}\n```\n\n")
+
     parts.append("\n## Narrative Report\n")
     parts.append(results.get("narrative", "") + "\n")
 
@@ -138,7 +206,8 @@ with st.sidebar:
         _res = st.session_state["results"]
         _fname = st.session_state["uploaded_filename"]
 
-        md_report = _build_markdown_report(_res, _fname)
+        _sel_sidebar = st.session_state.get("selected_solutions") or None
+        md_report = _build_markdown_report(_res, _fname, selected_solutions=_sel_sidebar)
         st.download_button(
             label="Report (.md)",
             data=md_report,
@@ -160,11 +229,12 @@ with st.sidebar:
     st.divider()
     st.caption("HOW IT WORKS")
     for step, text in [
-        ("1", "Upload a CSV file"),
-        ("2", "Collection agent infers schema and calls MCP tools"),
-        ("3", "Quality agent audits the data"),
-        ("4", "Reporting agent writes a narrative summary"),
-        ("5", "Results appear across the tabs"),
+        ("1", "Upload a CSV or ZIP of images"),
+        ("2", "Add optional context so agents know your domain"),
+        ("3", "Collection agent infers schema, stats, and plots"),
+        ("4", "Quality agent audits issues — dismiss any that are intentional"),
+        ("5", "Solutions agent recommends fixes — check the ones you want"),
+        ("6", "Report exports only your selected actions"),
     ]:
         st.markdown(
             f"<div style='display:flex; gap:10px; align-items:flex-start; "
@@ -193,24 +263,55 @@ st.markdown(
 )
 
 st.markdown("**Upload your dataset**")
-uploaded_file = st.file_uploader("", type=["csv"], label_visibility="collapsed")
+st.caption("CSV file — or a ZIP archive containing images (JPEG/PNG/etc.)")
+uploaded_file = st.file_uploader("", type=["csv", "zip"], label_visibility="collapsed")
 
 if uploaded_file is not None:
+    with st.expander("Analysis options", expanded=False):
+        st.caption("Schema & Stats is always run. Toggle the others to control scope.")
+        st.text("Schema & Stats — always on", )
+        run_viz      = st.checkbox("Visualizations",         value=True, key="opt_viz")
+        run_anomaly  = st.checkbox("Anomaly Detection",      value=True, key="opt_anomaly")
+        run_quality  = st.checkbox("Data Quality Audit",     value=True, key="opt_quality")
+        run_solutions = st.checkbox("Solutions & Remediation", value=True, key="opt_solutions")
+
     run_btn = st.button("Run Analysis", type="primary", use_container_width=True)
 
     if run_btn:
-        # Clear any previous results so stale data never bleeds into the new run
-        for key in ("results", "uploaded_filename"):
+        # Clear any previous results and HITL state so stale data never bleeds into the new run
+        for key in ("results", "uploaded_filename", "dismissed_issues", "selected_solutions"):
             st.session_state.pop(key, None)
 
-        # Save uploaded file to a temp path the MCP server can access
-        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
-            tmp.write(uploaded_file.getvalue())
-            tmp_path = tmp.name
+        tmp_path = None
+        tmp_image_dir = None
 
         try:
+            if uploaded_file.name.lower().endswith(".zip"):
+                # Guard: reject oversized ZIPs before extracting
+                zip_mb = len(uploaded_file.getvalue()) / (1024 * 1024)
+                if zip_mb > _MAX_ZIP_MB:
+                    st.error(f"ZIP file is {zip_mb:.0f} MB — maximum allowed is {_MAX_ZIP_MB} MB.")
+                    st.stop()
+
+                # Extract ZIP; handle nested folder layout transparently
+                tmp_image_dir = tempfile.mkdtemp()
+                with zipfile.ZipFile(io.BytesIO(uploaded_file.getvalue())) as zf:
+                    zf.extractall(tmp_image_dir)
+                pipeline_input = _find_image_dir(tmp_image_dir)
+            else:
+                with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+                    tmp.write(uploaded_file.getvalue())
+                    tmp_path = tmp.name
+                pipeline_input = tmp_path
+
+            enabled = frozenset(filter(None, [
+                "visualizations"    if run_viz       else None,
+                "anomaly_detection" if run_anomaly   else None,
+                "data_quality"      if run_quality   else None,
+                "solutions"         if run_solutions else None,
+            ]))
             with st.spinner("Agents working... this may take a minute."):
-                results = run_pipeline(tmp_path, model=model)
+                results = run_pipeline(pipeline_input, model=model, enabled_categories=enabled)
         except Exception as e:
             # Recursively unwrap nested ExceptionGroups (from asyncio TaskGroup)
             def _leaf_exceptions(exc):
@@ -222,7 +323,10 @@ if uploaded_file is not None:
                 st.error(f"Pipeline failed: {type(leaf).__name__}: {leaf}")
             st.stop()
         finally:
-            os.unlink(tmp_path)
+            if tmp_path and os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            if tmp_image_dir:
+                shutil.rmtree(tmp_image_dir, ignore_errors=True)
 
         # Store results in session state so tabs can access them
         st.session_state["results"] = results
@@ -240,7 +344,7 @@ if "results" in st.session_state:
     for r in tool_results:
         by_tool.setdefault(r["tool"], []).append(r)
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Schema & Stats", "Visualizations", "Anomalies", "Data Quality", "Report"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Schema & Stats", "Visualizations", "Anomalies", "Data Quality", "Solutions", "Report"])
 
     analysis_plan = results.get("analysis_plan", "")
 
@@ -248,6 +352,24 @@ if "results" in st.session_state:
     # Tab 1: Schema & Statistics
     # ------------------------------------------------------------------
     with tab1:
+        img_meta = results.get("image_processing_metadata")
+        if img_meta:
+            coverage = img_meta.get("coverage_percent", 0)
+            processed = img_meta.get("processed_count", 0)
+            total = img_meta.get("total_count", 0)
+            failed = img_meta.get("failed_count", 0)
+            feat_dim = img_meta.get("feature_dimension", 0)
+            st.info(
+                f"**Image dataset** — {processed}/{total} images processed "
+                f"({coverage:.1f}% coverage) · {feat_dim}-dim features · "
+                f"{failed} failed"
+            )
+            if img_meta.get("errors"):
+                with st.expander("Image processing errors"):
+                    for fname, err in img_meta["errors"][:10]:
+                        st.caption(f"`{fname}`: {err}")
+            st.divider()
+
         if analysis_plan:
             with st.expander("Agent's Analysis Plan", expanded=True):
                 st.markdown(analysis_plan)
@@ -430,24 +552,71 @@ if "results" in st.session_state:
             high_issues   = [i for i in issues if i["severity"] == "high"]
             medium_issues = [i for i in issues if i["severity"] == "medium"]
 
+            # Initialise dismiss state
+            if "dismissed_issues" not in st.session_state:
+                st.session_state["dismissed_issues"] = set()
+
             total_issues = len(issues) + (1 if dup_count else 0)
             if total_issues == 0:
                 st.success("No issues detected — this dataset looks clean.")
             else:
-                st.subheader(f"Issues  ({total_issues} found)")
-                for issue in high_issues:
-                    st.error(f"**{issue['column']}** — {issue['issue']}")
-                for issue in medium_issues:
-                    st.warning(f"**{issue['column']}** — {issue['issue']}")
+                dismissed = st.session_state["dismissed_issues"]
+                active_count = sum(
+                    1 for i in high_issues + medium_issues
+                    if f"{i['column']}|{i['issue']}" not in dismissed
+                ) + (1 if dup_count and "duplicates|duplicate_rows" not in dismissed else 0)
+
+                st.subheader(f"Issues  ({active_count} active · {len(dismissed)} dismissed)")
+                st.caption("Dismiss issues you've already handled or that are intentional — the Solutions tab will skip them.")
+
+                for issue in high_issues + medium_issues:
+                    issue_key = f"{issue['column']}|{issue['issue']}"
+                    is_dismissed = issue_key in dismissed
+                    col_msg, col_btn = st.columns([9, 1])
+                    with col_msg:
+                        if is_dismissed:
+                            st.caption(f"~~**{issue['column']}** — {issue['issue']}~~ _(dismissed)_")
+                        elif issue["severity"] == "high":
+                            st.error(f"**{issue['column']}** — {issue['issue']}")
+                        else:
+                            st.warning(f"**{issue['column']}** — {issue['issue']}")
+                    with col_btn:
+                        btn_label = "↩ Restore" if is_dismissed else "✕ Dismiss"
+                        if st.button(btn_label, key=f"dismiss_{issue_key}", use_container_width=True):
+                            if is_dismissed:
+                                st.session_state["dismissed_issues"].discard(issue_key)
+                            else:
+                                st.session_state["dismissed_issues"].add(issue_key)
+                            st.rerun()
+
                 if dup_count:
-                    st.warning(
-                        f"**Duplicate rows** — {dup_count} rows "
-                        f"({dup_result.get('duplicate_pct', 0):.1f}%) are exact duplicates."
-                    )
-                    examples = dup_result.get("examples", [])
-                    if examples:
-                        with st.expander("Show examples"):
-                            st.dataframe(pd.DataFrame(examples), use_container_width=True, hide_index=True)
+                    dup_key = "duplicates|duplicate_rows"
+                    is_dup_dismissed = dup_key in dismissed
+                    col_msg, col_btn = st.columns([9, 1])
+                    with col_msg:
+                        if is_dup_dismissed:
+                            st.caption(
+                                f"~~**Duplicate rows** — {dup_count} rows "
+                                f"({dup_result.get('duplicate_pct', 0):.1f}%) are exact duplicates.~~ _(dismissed)_"
+                            )
+                        else:
+                            st.warning(
+                                f"**Duplicate rows** — {dup_count} rows "
+                                f"({dup_result.get('duplicate_pct', 0):.1f}%) are exact duplicates."
+                            )
+                    with col_btn:
+                        btn_label = "↩ Restore" if is_dup_dismissed else "✕ Dismiss"
+                        if st.button(btn_label, key=f"dismiss_{dup_key}", use_container_width=True):
+                            if is_dup_dismissed:
+                                st.session_state["dismissed_issues"].discard(dup_key)
+                            else:
+                                st.session_state["dismissed_issues"].add(dup_key)
+                            st.rerun()
+                    if not is_dup_dismissed:
+                        examples = dup_result.get("examples", [])
+                        if examples:
+                            with st.expander("Show examples"):
+                                st.dataframe(pd.DataFrame(examples), use_container_width=True, hide_index=True)
 
         # ------------------------------------------------------------------
         # Section 5: Quality plots (missing heatmap + Q-Q plots)
@@ -483,12 +652,97 @@ if "results" in st.session_state:
             st.markdown(q_narrative)
 
     # ------------------------------------------------------------------
-    # Tab 5: Report
+    # Tab 5: Solutions & Remediation
     # ------------------------------------------------------------------
     with tab5:
+        st.subheader("Solutions & Remediation Recommendations")
+
+        solutions_narrative = results.get("solutions_narrative", "")
+        solutions_tool_results = results.get("solutions_tool_results", [])
+
+        if not solutions_narrative and not solutions_tool_results:
+            st.info("No data quality issues detected — no remediation needed.")
+        else:
+            # Initialise selection state
+            if "selected_solutions" not in st.session_state:
+                st.session_state["selected_solutions"] = set()
+
+            dismissed_issues = st.session_state.get("dismissed_issues", set())
+
+            # Section 1: High-level remediation strategy
+            if solutions_narrative:
+                with st.expander("Remediation Strategy", expanded=True):
+                    st.markdown(solutions_narrative)
+                st.divider()
+
+            # Section 2: Detailed per-issue solutions with checkboxes
+            if solutions_tool_results:
+                for tool_result in solutions_tool_results:
+                    if tool_result["tool"] != "recommend_solutions":
+                        continue
+                    recommendations = tool_result["result"].get("recommendations", [])
+                    if not recommendations:
+                        continue
+
+                    st.subheader("Actionable Solutions by Issue")
+                    st.caption("Check the actions you want to implement — only checked items appear in the exported report.")
+
+                    _widget_idx = 0
+                    for rec in recommendations:
+                        col_name = rec.get("column", "—")
+                        issue_type = rec.get("issue_type", "unknown")
+                        severity = rec.get("severity", "medium")
+                        actions = rec.get("actions", [])
+
+                        # Skip issues the user dismissed in the Quality tab
+                        if any(col_name in dk for dk in dismissed_issues):
+                            continue
+
+                        severity_color = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(severity, "⚪")
+
+                        with st.expander(f"{severity_color} {col_name} — {issue_type}"):
+                            for action in actions:
+                                priority = action.get("priority", "medium").upper()
+                                action_name = action.get("action", "")
+                                rationale = action.get("rationale", "")
+                                implementation = action.get("implementation", "")
+
+                                action_key = f"{col_name}|{issue_type}|{action_name}"
+                                is_checked = action_key in st.session_state["selected_solutions"]
+
+                                # Use a stable numeric index so keys are always unique
+                                checked = st.checkbox(
+                                    f"**[{priority}]** {action_name}",
+                                    value=is_checked,
+                                    key=f"sol_{_widget_idx}",
+                                )
+                                _widget_idx += 1
+                                if checked:
+                                    st.session_state["selected_solutions"].add(action_key)
+                                else:
+                                    st.session_state["selected_solutions"].discard(action_key)
+
+                                st.caption(f"**Rationale:** {rationale}")
+                                if implementation:
+                                    st.code(implementation, language="python")
+                                st.divider()
+
+            sel_count = len(st.session_state["selected_solutions"])
+            if sel_count:
+                st.info(f"{sel_count} action(s) selected — the exported report will include only these.")
+
+    # ------------------------------------------------------------------
+    # Tab 6: Report
+    # ------------------------------------------------------------------
+    with tab6:
         st.subheader("Automated Analysis Report")
         fname = st.session_state.get("uploaded_filename", "analysis")
-        md_report = _build_markdown_report(results, fname)
+        _sel = st.session_state.get("selected_solutions") or None
+        md_report = _build_markdown_report(results, fname, selected_solutions=_sel)
+
+        if _sel:
+            st.info(f"Report filtered to {len(_sel)} selected solution(s). Clear selections in the Solutions tab to export everything.")
+
         st.download_button(
             label="Download Report (.md)",
             data=md_report,
