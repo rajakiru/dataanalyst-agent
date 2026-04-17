@@ -45,7 +45,7 @@ export function UploadStep({ appState, setAppState, setActiveStep, markDone }: P
     }
 
     try {
-      const res = await fetch("/api/plan", { method: "POST", body: formData });
+      const res = await fetch("/api/plan", { method: "POST", body: formData, signal: AbortSignal.timeout(120_000) });
       const planState = await res.json();
       setAppState((p) => ({ ...p, planState }));
       markDone("upload");

@@ -56,11 +56,12 @@ export function ReviewStep({ appState, setAppState, setActiveStep, markDone }: P
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ plan_state: appState.planState, approved_tools: approvedTools }),
+        signal: AbortSignal.timeout(290_000),
       });
       const results = await res.json();
       setAppState((p) => ({ ...p, results }));
-    } catch {
-      alert("Execution failed. Check that the Python backend is running.");
+    } catch (e) {
+      alert(`Execution failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setLoading(false);
     }
