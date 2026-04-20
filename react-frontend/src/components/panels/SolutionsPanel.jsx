@@ -1,11 +1,13 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { downloadCleanedCsv } from '../../api'
+import FixPreviewModal from '../FixPreviewModal'
 
 export default function SolutionsPanel({
   results, sessionId,
   appliedSolutions, setAppliedSolutions,
   selectedSolutions, setSelectedSolutions,
 }) {
+  const [previewFix, setPreviewFix] = useState(null) // {code, label, column}
 
   const solutionsNarrative = results?.solutions_narrative || ''
   const solutionsToolResults = results?.solutions_tool_results || []
@@ -52,6 +54,14 @@ export default function SolutionsPanel({
   }
 
   return (
+    <>
+    {previewFix && (
+      <FixPreviewModal
+        sessionId={sessionId}
+        fix={previewFix}
+        onClose={() => setPreviewFix(null)}
+      />
+    )}
     <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
       <div className="p-5 space-y-5">
         <h2 className="text-base font-semibold text-slate-800">Suggest Fixes</h2>
@@ -136,17 +146,29 @@ export default function SolutionsPanel({
                                 {applied && <span className="ml-2 text-emerald-600 font-normal text-xs">— applied</span>}
                               </span>
                               {action.implementation && (
-                                <button
-                                  onClick={() => applied ? undoFix(key) : applyFix(key, action.action, action.implementation)}
-                                  className={[
-                                    'text-xs px-3 py-1.5 rounded-lg font-semibold transition-colors flex-shrink-0',
-                                    applied
-                                      ? 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                                      : 'bg-indigo-600 text-white hover:bg-indigo-700',
-                                  ].join(' ')}
-                                >
-                                  {applied ? 'Undo' : 'Apply Fix'}
-                                </button>
+                                <div className="flex gap-1.5 flex-shrink-0">
+                                  <button
+                                    onClick={() => setPreviewFix({
+                                      code: action.implementation,
+                                      label: action.action,
+                                      column: colName,
+                                    })}
+                                    className="text-xs px-2.5 py-1.5 rounded-lg font-semibold border border-slate-200 text-slate-600 hover:bg-slate-50 transition-colors"
+                                  >
+                                    Preview
+                                  </button>
+                                  <button
+                                    onClick={() => applied ? undoFix(key) : applyFix(key, action.action, action.implementation)}
+                                    className={[
+                                      'text-xs px-3 py-1.5 rounded-lg font-semibold transition-colors',
+                                      applied
+                                        ? 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                        : 'bg-indigo-600 text-white hover:bg-indigo-700',
+                                    ].join(' ')}
+                                  >
+                                    {applied ? 'Undo' : 'Apply Fix'}
+                                  </button>
+                                </div>
                               )}
                             </div>
 
@@ -181,5 +203,6 @@ export default function SolutionsPanel({
         )}
       </div>
     </div>
+    </>
   )
 }

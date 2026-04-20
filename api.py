@@ -616,6 +616,98 @@ async def simulate_fix(session_id: str, req: SimulateFixRequest):
 
 
 # ---------------------------------------------------------------------------
+# POST /api/preview-fix/{session_id}  — show sample rows before & after a fix
+# ---------------------------------------------------------------------------
+
+class PreviewFixRequest(BaseModel):
+    code: str
+    column: str = ""   # which column the fix targets (for focused diff)
+    n_rows: int = 15   # sample size
+
+
+@app.post("/api/preview-fix/{session_id}")
+async def preview_fix(session_id: str, req: PreviewFixRequest):
+    import math
+    import pandas as pd
+
+    session = _SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    csv_path = session.get("csv_path", "")
+    if not csv_path or not os.path.exists(csv_path):
+        raise HTTPException(400, "Original CSV not available")
+
+    try:
+        df_before = pd.read_csv(csv_path)
+        df_after = df_before.copy()
+        exec_error = None
+        try:
+            exec(req.code, {"df": df_after, "pd": pd})  # noqa: S102
+        except Exception as e:
+            exec_error = str(e)
+
+        # Focus on affected rows: prefer rows where the target column changed,
+        # fall back to rows that had NaN before (most informative for imputation).
+        col = req.column if req.column and req.column in df_before.columns else None
+
+        if col:
+            changed_mask = df_before[col].isna() | (df_before[col] != df_after[col])
+            focus_idx = df_before.index[changed_mask].tolist()
+            if not focus_idx:
+                focus_idx = df_before.index.tolist()
+        else:
+            focus_idx = df_before.index.tolist()
+
+        sample_idx = focus_idx[: req.n_rows]
+
+        # Columns to show: target col + a couple of context cols
+        cols_to_show = list(df_before.columns) if col is None else (
+            [col] + [c for c in df_before.columns if c != col][:4]
+        )
+        cols_to_show = cols_to_show[:8]  # cap at 8 columns
+
+        def _safe(v):
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                return None
+            return v
+
+        def rows_to_records(df, idx, cols):
+            return [
+                {c: _safe(df.at[i, c]) for c in cols if c in df.columns}
+                for i in idx
+            ]
+
+        before_rows = rows_to_records(df_before, sample_idx, cols_to_show)
+        after_rows  = rows_to_records(df_after,  sample_idx, cols_to_show)
+
+        # Mark which cells changed
+        changed_cells = []
+        for row_pos, i in enumerate(sample_idx):
+            for c in cols_to_show:
+                if c not in df_before.columns or c not in df_after.columns:
+                    continue
+                bv, av = df_before.at[i, c], df_after.at[i, c]
+                b_null = isinstance(bv, float) and math.isnan(bv)
+                a_null = isinstance(av, float) and math.isnan(av)
+                if b_null != a_null or (not b_null and not a_null and bv != av):
+                    changed_cells.append({"row": row_pos, "col": c})
+
+    except Exception as exc:
+        raise HTTPException(500, f"Preview failed: {exc}")
+
+    return {
+        "columns": cols_to_show,
+        "before": before_rows,
+        "after":  after_rows,
+        "changed_cells": changed_cells,
+        "total_affected": len(focus_idx),
+        "exec_error": exec_error,
+    }
+
+
+
+# ---------------------------------------------------------------------------
 # GET /api/plots/zip/{session_id}  — download all plots as ZIP
 # ---------------------------------------------------------------------------
 

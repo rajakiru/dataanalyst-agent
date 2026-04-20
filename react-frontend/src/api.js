@@ -138,6 +138,16 @@ export function getPlotUrl(session_id, filename) {
   return `${BASE}/api/plots/${session_id}/${filename}`
 }
 
+export async function previewFix(session_id, code, column = '', n_rows = 15) {
+  const res = await fetch(`${BASE}/api/preview-fix/${session_id}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code, column, n_rows }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()
+}
+
 export async function simulateFix(session_id, applied_solutions = []) {
   const res = await fetch(`${BASE}/api/simulate-fix/${session_id}`, {
     method: 'POST',
