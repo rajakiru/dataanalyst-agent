@@ -26,6 +26,16 @@ export async function getSamples() {
   return res.json()  // { samples: [{name, available}] }
 }
 
+export async function loadCache(name) {
+  const res = await fetch(`${BASE}/api/load-cache`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()  // { session_id, filename, plan, results }
+}
+
 export async function runPlan(session_id, model, enabled_categories) {
   const res = await fetch(`${BASE}/api/plan`, {
     method: 'POST',

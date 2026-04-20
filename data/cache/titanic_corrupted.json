@@ -1,0 +1,1016 @@
+{
+  "plan": {
+    "analysis_plan": "The dataset contains 901 rows and 13 columns, with the following breakdown based on the inferred schema:\n\n### Numeric Columns:\n1. PassengerId (int64)\n2. Age (float64)\n3. SibSp (int64)\n4. Parch (int64)\n5. Fare (float64)\n\n### Categorical Columns:\n1. Survived (int64, but categorical in context)\n2. Pclass (int64, but categorical in context)\n3. Name (object)\n4. Sex (object)\n5. Ticket (object)\n6. Cabin (object)\n7. Embarked (object)\n8. DataSource (object)\n\n### Analysis Considerations:\n- **Number of Numeric Columns:** There are 5 numeric columns (PassengerId, Age, SibSp, Parch, Fare). This is sufficient to perform correlation analysis.\n- **Number of Categorical Columns:** There are 8 categorical columns, which allows for group comparisons, especially on survival rates.\n- **Potential Correlations:** \n  - Age, SibSp, Parch, and Fare are numeric and could correlate with survival (Survived).\n  - Pclass and Fare might also be correlated due to the socio-economic statuses they imply.\n\n### Concrete Step-by-Step Plan:\n1. **Run `summarize_statistics`** to get descriptive statistics for all numeric columns to understand their distributions and identify potential data quality issues.\n2. **Run `test_normality`** for the numeric columns to determine if any of them significantly deviate from normality, guiding further analysis.\n3. **Run `compute_correlations`** to compute correlations among the numeric columns.\n4. **Run `plot_correlation_heatmap`** to visualize correlations if there are 2+ numeric columns.\n5. **Run `plot_distribution`** for each numeric column (Age, SibSp, Parch, Fare) and categorical column (Survived, Pclass, Sex, Embarked) to understand their distributions visually.\n6. **Run `detect_anomalies`** for each numeric column to identify potential data entry errors or outliers.\n\nThis approach utilizes the available data efficiently, focusing on descriptive analysis and potential predictive relationships while ensuring we also visualize the distributions for a better understanding. \n\nNow, I will execute this plan.",
+    "available_tool_names": [
+      "infer_schema",
+      "summarize_statistics",
+      "compute_correlations",
+      "detect_anomalies",
+      "plot_distribution",
+      "plot_correlation_heatmap",
+      "plot_scatter",
+      "plot_boxplot",
+      "plot_pairplot"
+    ],
+    "planned_tool_names": [
+      "summarize_statistics",
+      "compute_correlations",
+      "detect_anomalies",
+      "plot_distribution",
+      "plot_correlation_heatmap"
+    ],
+    "tool_descriptions": {
+      "infer_schema": "Read a CSV file and return its schema: column names, inferred data types, shape (rows x cols), null counts per column, and column roles (numeric, categorical, datetime, or id). USE CASE: Always run first to understand data structure and inform downstream analysis choices. ISSUES DETECTED: Missing values, incorrect type conversions, ID columns, mixed-type columns.",
+      "summarize_statistics": "Compute descriptive statistics for all numeric columns: mean, std, min, max, quartiles, skewness, and kurtosis. USE CASE: Identify data distribution shape, central tendency, and spread. Detect skewed distributions. ISSUES DETECTED: High skewness (>|1|) indicates outliers or non-normal distributions; high kurtosis indicates heavy tails. SOLUTIONS: Use Box-Cox transformation for skewed data, or stratify analysis by skewness.",
+      "compute_correlations": "Compute the Pearson correlation matrix for all numeric columns. Returns the matrix as a nested dict and lists the top 5 strongest correlations. USE CASE: Identify redundant features, multicollinearity risks, and potential predictive relationships. ISSUES DETECTED: Very high correlations (>0.9) suggest redundancy; multicollinearity risks. SOLUTIONS: Consider feature engineering, dropping redundant columns, or applying dimensionality reduction (PCA).",
+      "detect_anomalies": "Detect outliers in a specific numeric column using the IQR method. Returns the count of outliers, their indices, and the IQR bounds used. USE CASE: Identify potential data entry errors, measurement noise, or rare valid events. ISSUES DETECTED: >5% outliers suggest possible data quality issues or skewed distributions. SOLUTIONS: Investigate root cause, remove if errors, use Winsorization if valid, or apply robust statistics.",
+      "plot_distribution": "Generate a histogram with a KDE overlay for a specific column and save it as a PNG. USE CASE: Visually assess normality, modality, skewness, and outlier presence. ISSUES DETECTED: Multimodal distributions, long tails, gaps, bimodality. SOLUTIONS: For categorical: investigate value imbalance; for numeric: consider transformations or stratified analysis.",
+      "plot_correlation_heatmap": "Generate a Seaborn correlation heatmap for all numeric columns and save it as a PNG. USE CASE: Identify multicollinearity, redundant features, and feature interaction patterns at a glance. ISSUES DETECTED: Strong clusters of correlated features, near-zero correlations. SOLUTIONS: Use feature selection, PCA, or domain knowledge to prune redundant features.",
+      "plot_scatter": "Generate a scatter plot with a regression line for two numeric columns. USE CASE: Visualize bivariate relationships, linearity, and outlier influence. Run only for column pairs with |correlation| > 0.5 to avoid noise. ISSUES DETECTED: Weak regression fit (scattered points), outliers, non-linear relationships. SOLUTIONS: Use polynomial features, non-linear regression, or robust regression if outliers present.",
+      "plot_boxplot": "Generate a box plot showing the distribution of a numeric column grouped by a categorical column. Use this to compare groups (e.g., species vs petal_length). USE CASE: Identify group-wise outliers, imbalanced group distributions, and homogeneity violations. ISSUES DETECTED: Outliers within groups, vastly different variances across groups, group imbalance. SOLUTIONS: Investigate why groups differ; consider stratified analysis or weighted models; address group imbalance via resampling.",
+      "test_normality": "Run a normality test on a numeric column. Uses Shapiro-Wilk for datasets under 5000 rows, otherwise D'Agostino-Pearson. Returns the test statistic, p-value. USE CASE: Validate assumptions for parametric tests (t-tests, ANOVA). Inform transformation strategy. ISSUES DETECTED: p < 0.05 indicates non-normal distribution. SOLUTIONS: Apply log, Box-Cox, or reciprocal transformations; use non-parametric tests; stratify by skewness.",
+      "plot_pairplot": "Generate a Seaborn pairplot showing pairwise relationships across all numeric columns. If a categorical column is present, it will be used as the hue. USE CASE: Holistic view of all bivariate relationships, identify clustering or separability. ISSUES DETECTED: Non-linear relationships, weak separation between groups, outliers in multiple dimensions.",
+      "compute_data_quality_score": "Compute an overall data quality score (0-100) and breakdown: completeness (non-null %), uniqueness (non-duplicate %), consistency (type uniformity). USE CASE: Assess dataset fitness for downstream analysis. Prioritize data cleaning efforts. ISSUES DETECTED: Low completeness (missing data), duplicates, type inconsistencies, zero-variance columns. SOLUTIONS: See recommend_solutions tool for per-issue remediation strategies.",
+      "detect_duplicates": "Detect duplicate rows in the dataset. Returns the count, percentage, and examples. USE CASE: Identify data integrity issues, prevent data leakage into train/test splits. ISSUES DETECTED: >0.5% duplicates suggest possible data entry or integration errors. SOLUTIONS: Remove exact duplicates; investigate if partial duplicates represent real phenomena or errors.",
+      "plot_missing_heatmap": "Generate a heatmap showing which cells in the dataset are missing (null). USE CASE: Visualize missing data patterns (MCAR, MAR, MNAR), identify columns to drop or impute. ISSUES DETECTED: Systematic missing patterns, high-missingness columns. SOLUTIONS: Use MCAR tests for imputation strategy; consider mean/KNN/forward-fill for MAR; drop MNAR columns if >50% missing.",
+      "plot_qq": "Generate a Q-Q (quantile-quantile) plot for a numeric column to visually assess normality. USE CASE: Visual complement to statistical normality tests (test_normality). ISSUES DETECTED: Deviations from diagonal line indicate non-normality. Curved tails = skewness, bent = kurtosis. SOLUTIONS: Apply appropriate transformations (log for right-skew, Box-Cox for general skew).",
+      "recommend_solutions": "Generate actionable remediation recommendations for data quality issues, distributional anomalies, and analysis challenges. Takes a list of detected issues (from data quality agent, normality tests, anomaly detection, etc.) and returns concrete, prioritized solutions with implementation guidance. USE CASE: Bridge the gap between problem detection and solution implementation. Ensures every detected issue receives a tailored fix recommendation.",
+      "process_images_to_csv": "Process a directory of images into a CSV feature table for analysis. Extracts features from each image (using pre-trained CNN or fallback color histograms) and metadata (EXIF, file stats). Returns a CSV file with image features and metadata, ready for downstream tabular analysis. USE CASE: Convert image datasets (Iris flowers, product photos, etc.) into tabular features for numerical analysis. ARCHITECTURE: Parallel per-image error handling - failures in individual images don't block the entire dataset. COVERAGE: Reports % of images successfully processed. Error budget: 5-20% failures is acceptable. OUTPUT: Returns path to generated CSV + metadata dict with coverage metrics."
+    },
+    "enabled_categories": [
+      "data_quality",
+      "visualizations",
+      "anomaly_detection",
+      "solutions"
+    ]
+  },
+  "results": {
+    "analysis_plan": "The dataset contains 901 rows and 13 columns, with the following breakdown based on the inferred schema:\n\n### Numeric Columns:\n1. PassengerId (int64)\n2. Age (float64)\n3. SibSp (int64)\n4. Parch (int64)\n5. Fare (float64)\n\n### Categorical Columns:\n1. Survived (int64, but categorical in context)\n2. Pclass (int64, but categorical in context)\n3. Name (object)\n4. Sex (object)\n5. Ticket (object)\n6. Cabin (object)\n7. Embarked (object)\n8. DataSource (object)\n\n### Analysis Considerations:\n- **Number of Numeric Columns:** There are 5 numeric columns (PassengerId, Age, SibSp, Parch, Fare). This is sufficient to perform correlation analysis.\n- **Number of Categorical Columns:** There are 8 categorical columns, which allows for group comparisons, especially on survival rates.\n- **Potential Correlations:** \n  - Age, SibSp, Parch, and Fare are numeric and could correlate with survival (Survived).\n  - Pclass and Fare might also be correlated due to the socio-economic statuses they imply.\n\n### Concrete Step-by-Step Plan:\n1. **Run `summarize_statistics`** to get descriptive statistics for all numeric columns to understand their distributions and identify potential data quality issues.\n2. **Run `test_normality`** for the numeric columns to determine if any of them significantly deviate from normality, guiding further analysis.\n3. **Run `compute_correlations`** to compute correlations among the numeric columns.\n4. **Run `plot_correlation_heatmap`** to visualize correlations if there are 2+ numeric columns.\n5. **Run `plot_distribution`** for each numeric column (Age, SibSp, Parch, Fare) and categorical column (Survived, Pclass, Sex, Embarked) to understand their distributions visually.\n6. **Run `detect_anomalies`** for each numeric column to identify potential data entry errors or outliers.\n\nThis approach utilizes the available data efficiently, focusing on descriptive analysis and potential predictive relationships while ensuring we also visualize the distributions for a better understanding. \n\nNow, I will execute this plan.",
+    "narrative": "### Dataset Overview\n\nThis report analyzes a dataset focused on passengers from the infamous Titanic voyage, containing 901 entries across 13 attributes. Each entry includes information about the passenger such as their unique ID (PassengerId), survival status (Survived), class (Pclass), personal details like name and sex, age, number of siblings/spouses aboard (SibSp), number of parents/children aboard (Parch), ticket information, fare paid (Fare), cabin number, embarkation port (Embarked), and the data source. The dataset is primarily aimed at understanding factors that influenced survival rates during the Titanic disaster.\n\n### Key Statistics and Distributions\n\nA review of the data reveals several key statistics. Of the 901 passengers, about 38.5% survived the voyage. The majority of passengers belonged to the 3rd class (with a mean Pclass of around 2.3) and the average age of passengers was approximately 29.7 years. There are significant gaps in some data points, particularly in age (about 20% missing) and fare (about 3.3% missing), with an alarming 77% of records missing cabin information. This suggests that while basic demographics are represented, detailed travel conditions are often unrecorded.\n\n### Important Correlations\n\nExamining the relationships between variables reveals some notable correlations. The class of ticket (Pclass) is negatively correlated with survival, which indicates that passengers in lower classes had a lower chance of survival. There is also a moderate correlation between the number of siblings/spouses aboard (SibSp) and the number of parents/children (Parch), suggesting that family composition may influence passenger experiences. Age, while present, has minimal correlation with survival or class, indicating other factors likely played a more significant role.\n\n### Anomalies Detected\n\nThe analysis identified several anomalies, particularly in the Age, SibSp, and Fare columns. For Age, 11 outliers were found, indicating some passengers' ages were significantly higher or lower than typical, impacting the overall age distribution. Similarly, 12 anomalies were detected in SibSp, where some individuals had unusually high counts of siblings or spouses aboard. In terms of Fare, a substantial 55 outliers were identified, with some individuals having paid exorbitantly high fares compared to the majority, skewing the fare distribution.\n\n### Data Quality Assessment and Recommendations\n\nThe dataset contains some quality issues, primarily in the form of missing values and outliers, which could affect analysis and insights. It is recommended that the missing data for Age and Fare be addressed, either through imputation methods or careful examination of missingness patterns. Additionally, given the anomalies found, a review of outlier handling techniques may be beneficial. For instance, excluding extreme values might yield clearer insights into the travel patterns and survival rates. Lastly, considering the high proportion of missing cabin data, efforts should be made to verify and enrich this information through alternative sources or related datasets.",
+    "quality_narrative": "The recent data quality audit has yielded an overall quality score of 92.1. This high score reflects strong performance in terms of data completeness (92.28) and uniqueness (99.0), indicating that the majority of records are present and non-redundant. However, there is a notable concern with the consistency score of 85.0, which is below expectations. Specific issues have been identified that could affect the reliability and utility of the dataset, especially regarding the columns \"Ticket\" and \"Cabin\", both of which present high-severity issues due to mixed data types and significant missing values, respectively.\n\nFirst, the \"Ticket\" column has been flagged for mixed data types, where 70% of the entries are numeric-like. This inconsistency could impair data analysis and modeling efforts. It is recommended to standardize the data format in this column to a single type, either converting all entries to strings or numeric values as appropriate. The \"Cabin\" column exhibits a distressing 77% of its data missing, representing a critical gap in information. Strategies to address this may include data imputation techniques or leveraging external datasets to fill in missing values based on correlations with other features. Additionally, the high percentage of missing values in the \"Age\" column (19.8%) also needs to be resolved\u2014users should apply similar imputation methods to provide a more complete dataset. Finally, the presence of 9 duplicate rows (1.0%) should be rectified by implementing checks to ensure unique entries are maintained during data entry and processing. Addressing these issues will enhance the dataset's integrity and facilitate more accurate analysis outcomes.",
+    "solutions_narrative": "To effectively remediate the data quality issues identified, we will follow a prioritized action plan focusing first on high-severity issues. The first step is to address the type inconsistency in the \"Ticket\" column, as this will directly impact the integrity of any analyses conducted. We will standardize the \"Ticket\" column by converting all entries to a uniform type, ensuring that numeric-like values remain numeric and any non-numeric entries are flagged for review or transformation. This step will improve the reliability of ticket-related queries and analyses.\n\nNext, we will address the high-severity issue of missing values in the \"Cabin\" column, which has an alarming 77.0% of values absent. Given the high percentage, we will evaluate options for handling these missing entries, including data imputation techniques or flagging these records for further investigation. If the missing values are systemically irrelevant, consideration can be given to removing the column entirely. After resolving the high-severity issues, we will turn our attention to the medium-severity issues regarding the \"Age\" column, which has 19.8% missing values and the duplicate rows. We can impute or categorize the missing age values and remove the duplicates to ensure the dataset is clean, which will enhance its overall quality and analytical usability.",
+    "tool_results": [
+      {
+        "tool": "infer_schema",
+        "args": {},
+        "result": {
+          "shape": {
+            "rows": 901,
+            "cols": 13
+          },
+          "columns": [
+            "PassengerId",
+            "Survived",
+            "Pclass",
+            "Name",
+            "Sex",
+            "Age",
+            "SibSp",
+            "Parch",
+            "Ticket",
+            "Fare",
+            "Cabin",
+            "Embarked",
+            "DataSource"
+          ],
+          "dtypes": {
+            "PassengerId": "int64",
+            "Survived": "int64",
+            "Pclass": "int64",
+            "Name": "object",
+            "Sex": "object",
+            "Age": "float64",
+            "SibSp": "int64",
+            "Parch": "int64",
+            "Ticket": "object",
+            "Fare": "float64",
+            "Cabin": "object",
+            "Embarked": "object",
+            "DataSource": "object"
+          },
+          "null_counts": {
+            "PassengerId": 0,
+            "Survived": 0,
+            "Pclass": 0,
+            "Name": 0,
+            "Sex": 0,
+            "Age": 178,
+            "SibSp": 0,
+            "Parch": 0,
+            "Ticket": 0,
+            "Fare": 30,
+            "Cabin": 694,
+            "Embarked": 2,
+            "DataSource": 0
+          },
+          "null_pct": {
+            "PassengerId": 0.0,
+            "Survived": 0.0,
+            "Pclass": 0.0,
+            "Name": 0.0,
+            "Sex": 0.0,
+            "Age": 19.76,
+            "SibSp": 0.0,
+            "Parch": 0.0,
+            "Ticket": 0.0,
+            "Fare": 3.33,
+            "Cabin": 77.03,
+            "Embarked": 0.22,
+            "DataSource": 0.0
+          },
+          "roles": {
+            "PassengerId": "numeric",
+            "Survived": "categorical",
+            "Pclass": "categorical",
+            "Name": "categorical",
+            "Sex": "categorical",
+            "Age": "numeric",
+            "SibSp": "categorical",
+            "Parch": "categorical",
+            "Ticket": "categorical",
+            "Fare": "numeric",
+            "Cabin": "categorical",
+            "Embarked": "categorical",
+            "DataSource": "categorical"
+          },
+          "sample_values": {
+            "PassengerId": [
+              1,
+              2,
+              3
+            ],
+            "Survived": [
+              0,
+              1,
+              1
+            ],
+            "Pclass": [
+              3,
+              1,
+              3
+            ],
+            "Name": [
+              "Braund, Mr. Owen Harris",
+              "Cumings, Mrs. John Bradley (Florence Briggs Thayer)",
+              "Heikkinen, Miss. Laina"
+            ],
+            "Sex": [
+              "male",
+              "female",
+              "female"
+            ],
+            "Age": [
+              22.0,
+              38.0,
+              26.0
+            ],
+            "SibSp": [
+              1,
+              1,
+              0
+            ],
+            "Parch": [
+              0,
+              0,
+              0
+            ],
+            "Ticket": [
+              "A/5 21171",
+              "PC 17599",
+              "STON/O2. 3101282"
+            ],
+            "Fare": [
+              7.25,
+              71.2833,
+              7.925
+            ],
+            "Cabin": [
+              "C85",
+              "C123",
+              "E46"
+            ],
+            "Embarked": [
+              "S",
+              "C",
+              "S"
+            ],
+            "DataSource": [
+              "titanic",
+              "titanic",
+              "titanic"
+            ]
+          }
+        }
+      },
+      {
+        "tool": "summarize_statistics",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv"
+        },
+        "result": {
+          "statistics": {
+            "PassengerId": {
+              "count": 901.0,
+              "mean": 441.111,
+              "std": 260.0524,
+              "min": 1.0,
+              "25%": 216.0,
+              "50%": 441.0,
+              "75%": 666.0,
+              "max": 891.0,
+              "skewness": 0.0024,
+              "kurtosis": -1.2031
+            },
+            "Survived": {
+              "count": 901.0,
+              "mean": 0.3851,
+              "std": 0.4869,
+              "min": 0.0,
+              "25%": 0.0,
+              "50%": 0.0,
+              "75%": 1.0,
+              "max": 1.0,
+              "skewness": 0.4729,
+              "kurtosis": -1.7803
+            },
+            "Pclass": {
+              "count": 901.0,
+              "mean": 2.3085,
+              "std": 0.8368,
+              "min": 1.0,
+              "25%": 2.0,
+              "50%": 3.0,
+              "75%": 3.0,
+              "max": 3.0,
+              "skewness": -0.6306,
+              "kurtosis": -1.2824
+            },
+            "Age": {
+              "count": 723.0,
+              "mean": 29.6793,
+              "std": 14.5222,
+              "min": 0.42,
+              "25%": 20.25,
+              "50%": 28.0,
+              "75%": 38.0,
+              "max": 80.0,
+              "skewness": 0.384,
+              "kurtosis": 0.1758
+            },
+            "SibSp": {
+              "count": 901.0,
+              "mean": 0.525,
+              "std": 1.1009,
+              "min": 0.0,
+              "25%": 0.0,
+              "50%": 0.0,
+              "75%": 1.0,
+              "max": 8.0,
+              "skewness": 3.6802,
+              "kurtosis": 17.7919
+            },
+            "Parch": {
+              "count": 901.0,
+              "mean": 0.3807,
+              "std": 0.8044,
+              "min": 0.0,
+              "25%": 0.0,
+              "50%": 0.0,
+              "75%": 0.0,
+              "max": 6.0,
+              "skewness": 2.7469,
+              "kurtosis": 9.7682
+            },
+            "Fare": {
+              "count": 871.0,
+              "mean": 60.6209,
+              "std": 378.7877,
+              "min": 0.0,
+              "25%": 7.925,
+              "50%": 14.4583,
+              "75%": 31.275,
+              "max": 5000.0,
+              "skewness": 12.7792,
+              "kurtosis": 164.3194
+            }
+          }
+        }
+      },
+      {
+        "tool": "compute_correlations",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv"
+        },
+        "result": {
+          "correlation_matrix": {
+            "PassengerId": {
+              "PassengerId": 1.0,
+              "Survived": -0.0093,
+              "Pclass": -0.0342,
+              "Age": 0.0382,
+              "SibSp": -0.0594,
+              "Parch": 0.0003,
+              "Fare": -0.1045
+            },
+            "Survived": {
+              "PassengerId": -0.0093,
+              "Survived": 1.0,
+              "Pclass": -0.3383,
+              "Age": -0.0767,
+              "SibSp": -0.0356,
+              "Parch": 0.082,
+              "Fare": -0.0261
+            },
+            "Pclass": {
+              "PassengerId": -0.0342,
+              "Survived": -0.3383,
+              "Pclass": 1.0,
+              "Age": -0.3724,
+              "SibSp": 0.0821,
+              "Parch": 0.0217,
+              "Fare": -0.0279
+            },
+            "Age": {
+              "PassengerId": 0.0382,
+              "Survived": -0.0767,
+              "Pclass": -0.3724,
+              "Age": 1.0,
+              "SibSp": -0.3132,
+              "Parch": -0.1903,
+              "Fare": -0.0135
+            },
+            "SibSp": {
+              "PassengerId": -0.0594,
+              "Survived": -0.0356,
+              "Pclass": 0.0821,
+              "Age": -0.3132,
+              "SibSp": 1.0,
+              "Parch": 0.4127,
+              "Fare": 0.04
+            },
+            "Parch": {
+              "PassengerId": 0.0003,
+              "Survived": 0.082,
+              "Pclass": 0.0217,
+              "Age": -0.1903,
+              "SibSp": 0.4127,
+              "Parch": 1.0,
+              "Fare": 0.012
+            },
+            "Fare": {
+              "PassengerId": -0.1045,
+              "Survived": -0.0261,
+              "Pclass": -0.0279,
+              "Age": -0.0135,
+              "SibSp": 0.04,
+              "Parch": 0.012,
+              "Fare": 1.0
+            }
+          },
+          "top_correlations": [
+            {
+              "col1": "SibSp",
+              "col2": "Parch",
+              "correlation": 0.4127
+            },
+            {
+              "col1": "Pclass",
+              "col2": "Age",
+              "correlation": -0.3724
+            },
+            {
+              "col1": "Survived",
+              "col2": "Pclass",
+              "correlation": -0.3383
+            },
+            {
+              "col1": "Age",
+              "col2": "SibSp",
+              "correlation": -0.3132
+            },
+            {
+              "col1": "Age",
+              "col2": "Parch",
+              "correlation": -0.1903
+            }
+          ]
+        }
+      },
+      {
+        "tool": "detect_anomalies",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv",
+          "column": "Age"
+        },
+        "result": {
+          "column": "Age",
+          "iqr_bounds": {
+            "lower": -6.375,
+            "upper": 64.625
+          },
+          "q1": 20.25,
+          "q3": 38.0,
+          "iqr": 17.75,
+          "iqr_multiplier": 1.5,
+          "skewness": 0.384,
+          "outlier_count": 11,
+          "outlier_pct": 1.22,
+          "outlier_indices": [
+            33,
+            54,
+            96,
+            116,
+            280,
+            456,
+            493,
+            630,
+            672,
+            745,
+            851
+          ]
+        }
+      },
+      {
+        "tool": "detect_anomalies",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv",
+          "column": "SibSp"
+        },
+        "result": {
+          "column": "SibSp",
+          "iqr_bounds": {
+            "lower": -3.0,
+            "upper": 4.0
+          },
+          "q1": 0.0,
+          "q3": 1.0,
+          "iqr": 1.0,
+          "iqr_multiplier": 3.0,
+          "skewness": 3.6802,
+          "outlier_count": 12,
+          "outlier_pct": 1.33,
+          "outlier_indices": [
+            59,
+            71,
+            159,
+            180,
+            201,
+            324,
+            386,
+            480,
+            683,
+            792,
+            846,
+            863
+          ]
+        }
+      },
+      {
+        "tool": "detect_anomalies",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv",
+          "column": "Parch"
+        },
+        "result": {
+          "column": "Parch",
+          "iqr_bounds": {
+            "lower": 0.0,
+            "upper": 0.0
+          },
+          "q1": 0.0,
+          "q3": 0.0,
+          "iqr": 0.0,
+          "outlier_count": 0,
+          "outlier_pct": 0.0,
+          "outlier_indices": [],
+          "note": "IQR is zero (constant or near-constant column); outlier detection skipped."
+        }
+      },
+      {
+        "tool": "detect_anomalies",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv",
+          "column": "Fare"
+        },
+        "result": {
+          "column": "Fare",
+          "iqr_bounds": {
+            "lower": -62.125,
+            "upper": 101.325
+          },
+          "q1": 7.925,
+          "q3": 31.275,
+          "iqr": 23.35,
+          "iqr_multiplier": 3.0,
+          "skewness": 12.7792,
+          "outlier_count": 55,
+          "outlier_pct": 6.1,
+          "outlier_indices": [
+            5,
+            20,
+            27,
+            31,
+            50,
+            88,
+            100,
+            118,
+            195,
+            200,
+            215,
+            258,
+            268,
+            269,
+            297,
+            299,
+            305,
+            306,
+            307,
+            311,
+            318,
+            319,
+            332,
+            334,
+            337,
+            341,
+            373,
+            377,
+            380,
+            390,
+            435,
+            438,
+            498,
+            505,
+            527,
+            537,
+            544,
+            550,
+            581,
+            609,
+            659,
+            660,
+            679,
+            689,
+            698,
+            700,
+            708,
+            716,
+            730,
+            737
+          ]
+        }
+      },
+      {
+        "tool": "plot_distribution",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv",
+          "column": "Age"
+        },
+        "result": {
+          "plot_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/outputs/dist_Age.png",
+          "column": "Age"
+        }
+      },
+      {
+        "tool": "plot_distribution",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv",
+          "column": "SibSp"
+        },
+        "result": {
+          "plot_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/outputs/dist_SibSp.png",
+          "column": "SibSp"
+        }
+      },
+      {
+        "tool": "plot_distribution",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv",
+          "column": "Parch"
+        },
+        "result": {
+          "plot_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/outputs/dist_Parch.png",
+          "column": "Parch"
+        }
+      },
+      {
+        "tool": "plot_distribution",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv",
+          "column": "Fare"
+        },
+        "result": {
+          "plot_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/outputs/dist_Fare.png",
+          "column": "Fare"
+        }
+      },
+      {
+        "tool": "plot_distribution",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv",
+          "column": "Survived"
+        },
+        "result": {
+          "plot_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/outputs/dist_Survived.png",
+          "column": "Survived"
+        }
+      },
+      {
+        "tool": "plot_distribution",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv",
+          "column": "Pclass"
+        },
+        "result": {
+          "plot_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/outputs/dist_Pclass.png",
+          "column": "Pclass"
+        }
+      },
+      {
+        "tool": "plot_distribution",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv",
+          "column": "Sex"
+        },
+        "result": {
+          "plot_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/outputs/dist_Sex.png",
+          "column": "Sex"
+        }
+      },
+      {
+        "tool": "plot_distribution",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv",
+          "column": "Embarked"
+        },
+        "result": {
+          "plot_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/outputs/dist_Embarked.png",
+          "column": "Embarked"
+        }
+      }
+    ],
+    "quality_tool_results": [
+      {
+        "tool": "compute_data_quality_score",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv"
+        },
+        "result": {
+          "overall_score": 92.1,
+          "breakdown": {
+            "completeness": 92.28,
+            "uniqueness": 99.0,
+            "consistency": 85.0
+          },
+          "missing_cells": 904,
+          "duplicate_rows": 9,
+          "issues": [
+            {
+              "column": "Ticket",
+              "issue": "mixed types (70% numeric-like)",
+              "severity": "high"
+            },
+            {
+              "column": "Age",
+              "issue": "19.8% missing values",
+              "severity": "medium"
+            },
+            {
+              "column": "Cabin",
+              "issue": "77.0% missing values",
+              "severity": "high"
+            },
+            {
+              "column": "\u2014",
+              "issue": "9 duplicate rows (1.0%)",
+              "severity": "medium"
+            }
+          ]
+        }
+      },
+      {
+        "tool": "detect_duplicates",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv"
+        },
+        "result": {
+          "duplicate_rows": 9,
+          "duplicate_pct": 1.0,
+          "total_rows": 901,
+          "examples": [
+            {
+              "PassengerId": 1,
+              "Survived": 0,
+              "Pclass": 3,
+              "Name": "Braund, Mr. Owen Harris",
+              "Sex": "male",
+              "Age": 22.0,
+              "SibSp": 1,
+              "Parch": 0,
+              "Ticket": "A/5 21171",
+              "Fare": 7.25,
+              "Cabin": null,
+              "Embarked": "S",
+              "DataSource": "titanic"
+            },
+            {
+              "PassengerId": 2,
+              "Survived": 1,
+              "Pclass": 1,
+              "Name": "Cumings, Mrs. John Bradley (Florence Briggs Thayer)",
+              "Sex": "female",
+              "Age": 38.0,
+              "SibSp": 1,
+              "Parch": 0,
+              "Ticket": "PC 17599",
+              "Fare": 71.2833,
+              "Cabin": "C85",
+              "Embarked": "C",
+              "DataSource": "titanic"
+            },
+            {
+              "PassengerId": 3,
+              "Survived": 1,
+              "Pclass": 3,
+              "Name": "Heikkinen, Miss. Laina",
+              "Sex": "female",
+              "Age": 26.0,
+              "SibSp": 0,
+              "Parch": 0,
+              "Ticket": "STON/O2. 3101282",
+              "Fare": 7.925,
+              "Cabin": null,
+              "Embarked": "S",
+              "DataSource": "titanic"
+            },
+            {
+              "PassengerId": 4,
+              "Survived": 1,
+              "Pclass": 1,
+              "Name": "Futrelle, Mrs. Jacques Heath (Lily May Peel)",
+              "Sex": "female",
+              "Age": 35.0,
+              "SibSp": 1,
+              "Parch": 0,
+              "Ticket": "113803",
+              "Fare": 53.1,
+              "Cabin": "C123",
+              "Embarked": "S",
+              "DataSource": "titanic"
+            },
+            {
+              "PassengerId": 5,
+              "Survived": 0,
+              "Pclass": 3,
+              "Name": "Allen, Mr. William Henry",
+              "Sex": "male",
+              "Age": 35.0,
+              "SibSp": 0,
+              "Parch": 0,
+              "Ticket": "373450",
+              "Fare": 8.05,
+              "Cabin": null,
+              "Embarked": "S",
+              "DataSource": "titanic"
+            },
+            {
+              "PassengerId": 7,
+              "Survived": 0,
+              "Pclass": 1,
+              "Name": "McCarthy, Mr. Timothy J",
+              "Sex": "male",
+              "Age": 54.0,
+              "SibSp": 0,
+              "Parch": 0,
+              "Ticket": "17463",
+              "Fare": 51.8625,
+              "Cabin": "E46",
+              "Embarked": "S",
+              "DataSource": "titanic"
+            },
+            {
+              "PassengerId": 8,
+              "Survived": 0,
+              "Pclass": 3,
+              "Name": "Palsson, Master. Gosta Leonard",
+              "Sex": "male",
+              "Age": 2.0,
+              "SibSp": 3,
+              "Parch": 1,
+              "Ticket": "349909",
+              "Fare": 21.075,
+              "Cabin": null,
+              "Embarked": "S",
+              "DataSource": "titanic"
+            },
+            {
+              "PassengerId": 9,
+              "Survived": 1,
+              "Pclass": 3,
+              "Name": "Johnson, Mrs. Oscar W (Elisabeth Vilhelmina Berg)",
+              "Sex": "female",
+              "Age": 27.0,
+              "SibSp": 0,
+              "Parch": 2,
+              "Ticket": "347742",
+              "Fare": 11.1333,
+              "Cabin": null,
+              "Embarked": "S",
+              "DataSource": "titanic"
+            },
+            {
+              "PassengerId": 10,
+              "Survived": 1,
+              "Pclass": 2,
+              "Name": "Nasser, Mrs. Nicholas (Adele Achem)",
+              "Sex": "female",
+              "Age": 14.0,
+              "SibSp": 1,
+              "Parch": 0,
+              "Ticket": "237736",
+              "Fare": 30.0708,
+              "Cabin": null,
+              "Embarked": "C",
+              "DataSource": "titanic"
+            },
+            {
+              "PassengerId": 1,
+              "Survived": 0,
+              "Pclass": 3,
+              "Name": "Braund, Mr. Owen Harris",
+              "Sex": "male",
+              "Age": 22.0,
+              "SibSp": 1,
+              "Parch": 0,
+              "Ticket": "A/5 21171",
+              "Fare": 7.25,
+              "Cabin": null,
+              "Embarked": "S",
+              "DataSource": "titanic"
+            }
+          ],
+          "truncated": false
+        }
+      },
+      {
+        "tool": "plot_missing_heatmap",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv"
+        },
+        "result": {
+          "plot_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/outputs/missing_heatmap.png",
+          "columns_with_missing": [
+            "Age",
+            "Fare",
+            "Cabin",
+            "Embarked"
+          ],
+          "truncated": true
+        }
+      },
+      {
+        "tool": "plot_qq",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv",
+          "column": "Age"
+        },
+        "result": {
+          "plot_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/outputs/qq_Age.png",
+          "column": "Age",
+          "r_squared": 0.9824
+        }
+      },
+      {
+        "tool": "plot_qq",
+        "args": {
+          "csv_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/data/titanic_corrupted.csv",
+          "column": "Fare"
+        },
+        "result": {
+          "plot_path": "/Users/kiruthikaraja/CMU/Spring 2026/24780 AI Agents/project/outputs/qq_Fare.png",
+          "column": "Fare",
+          "r_squared": 0.0901
+        }
+      }
+    ],
+    "solutions_tool_results": [
+      {
+        "tool": "recommend_solutions",
+        "result": {
+          "total_issues": 5,
+          "solutions_provided": 5,
+          "recommendations": [
+            {
+              "column": "Ticket",
+              "issue_type": "type_inconsistency",
+              "severity": "high",
+              "detected_value": null,
+              "actions": [
+                {
+                  "priority": "high",
+                  "action": "Standardize data types",
+                  "rationale": "Mixed types (0% numeric-like) prevent proper analysis.",
+                  "implementation": "df['Ticket'] = pd.to_numeric(df['Ticket'], errors='coerce')"
+                },
+                {
+                  "priority": "high",
+                  "action": "Investigate and handle exceptions",
+                  "rationale": "Understand why non-numeric values exist; decide if they should be dropped or recoded.",
+                  "implementation": "df[~df['Ticket'].apply(lambda x: str(x).isnumeric())]"
+                }
+              ]
+            },
+            {
+              "column": "Age",
+              "issue_type": "missing_values",
+              "severity": "medium",
+              "detected_value": null,
+              "actions": [
+                {
+                  "priority": "high",
+                  "action": "Impute with mean/median (parametric approach)",
+                  "rationale": "Preserves distributional properties for numeric data.",
+                  "implementation": "df['Age'] = df['Age'].fillna(df['Age'].median())"
+                },
+                {
+                  "priority": "medium",
+                  "action": "Impute with KNN (for correlated features)",
+                  "rationale": "Better for complex relationships between features.",
+                  "implementation": "from sklearn.impute import KNNImputer; imputer = KNNImputer(); df = imputer.fit_transform(df)"
+                },
+                {
+                  "priority": "low",
+                  "action": "Create a 'missing' indicator feature",
+                  "rationale": "If missingness is informative for downstream models.",
+                  "implementation": "df['Age_is_missing'] = df['Age'].isnull().astype(int)"
+                }
+              ]
+            },
+            {
+              "column": "Cabin",
+              "issue_type": "missing_values",
+              "severity": "high",
+              "detected_value": null,
+              "actions": [
+                {
+                  "priority": "high",
+                  "action": "Impute with mode (most frequent value)",
+                  "rationale": "Categorical data: preserve class distribution.",
+                  "implementation": "df['Cabin'] = df['Cabin'].fillna(df['Cabin'].mode()[0])"
+                },
+                {
+                  "priority": "medium",
+                  "action": "Create 'Unknown' category",
+                  "rationale": "If missingness is informative.",
+                  "implementation": "df['Cabin'] = df['Cabin'].fillna('Unknown')"
+                }
+              ]
+            },
+            {
+              "column": "\u2014",
+              "issue_type": "duplicates",
+              "severity": "medium",
+              "detected_value": null,
+              "actions": [
+                {
+                  "priority": "high",
+                  "action": "Remove exact duplicates",
+                  "rationale": "Duplicates (0%) inflate sample size and introduce bias.",
+                  "implementation": "df = df.drop_duplicates()"
+                },
+                {
+                  "priority": "medium",
+                  "action": "Investigate root cause",
+                  "rationale": "Understand if duplicates are data entry errors or legitimate repeated observations.",
+                  "implementation": "df[df.duplicated(keep=False)].sort_values(by=list(df.columns)).head(10)"
+                }
+              ]
+            },
+            {
+              "column": "\u2014",
+              "issue_type": "duplicates",
+              "severity": "medium",
+              "detected_value": null,
+              "actions": [
+                {
+                  "priority": "high",
+                  "action": "Remove exact duplicates",
+                  "rationale": "Duplicates (1.0%) inflate sample size and introduce bias.",
+                  "implementation": "df = df.drop_duplicates()"
+                },
+                {
+                  "priority": "medium",
+                  "action": "Investigate root cause",
+                  "rationale": "Understand if duplicates are data entry errors or legitimate repeated observations.",
+                  "implementation": "df[df.duplicated(keep=False)].sort_values(by=list(df.columns)).head(10)"
+                }
+              ]
+            }
+          ],
+          "summary": "Generated 5 actionable recommendations for 5 detected issues. Prioritize 'high' actions first; 'medium' and 'low' are alternatives or optimizations."
+        }
+      }
+    ],
+    "plot_paths": [],
+    "quality_plot_paths": []
+  }
+}

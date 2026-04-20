@@ -288,12 +288,62 @@ async def upload_sample(req: UploadSampleRequest):
 # GET /api/samples
 # ---------------------------------------------------------------------------
 
+CACHE_DIR = DATA_DIR / "cache"
+
+# Maps sample name → cache filename stem
+SAMPLE_CACHE = {
+    "Titanic (corrupted)": "titanic_corrupted",
+}
+
 @app.get("/api/samples")
 async def list_samples():
     samples = []
     for name, path in SAMPLE_FILES.items():
-        samples.append({"name": name, "available": path.exists()})
+        cache_stem = SAMPLE_CACHE.get(name)
+        has_cache = bool(cache_stem and (CACHE_DIR / f"{cache_stem}.json").exists())
+        samples.append({"name": name, "available": path.exists(), "cached": has_cache})
     return {"samples": samples}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/load-cache  — skip pipeline, load pre-computed results
+# ---------------------------------------------------------------------------
+
+class LoadCacheRequest(BaseModel):
+    name: str  # sample name
+
+@app.post("/api/load-cache")
+async def load_cache(req: LoadCacheRequest):
+    cache_stem = SAMPLE_CACHE.get(req.name)
+    if not cache_stem:
+        raise HTTPException(404, "No cache for this sample")
+    cache_path = CACHE_DIR / f"{cache_stem}.json"
+    if not cache_path.exists():
+        raise HTTPException(404, "Cache file not found")
+
+    with open(cache_path) as f:
+        cached = json.load(f)
+
+    # Create a session with the cached CSV path + pre-loaded results
+    csv_path = SAMPLE_FILES.get(req.name)
+    if not csv_path or not csv_path.exists():
+        raise HTTPException(400, "Sample CSV not found")
+
+    session_id = str(uuid.uuid4())
+    _SESSIONS[session_id] = {
+        "csv_path": str(csv_path),
+        "filename": csv_path.name,
+        "plan_state": None,
+        "results": cached.get("results", {}),
+        "plot_dir": None,
+    }
+
+    return {
+        "session_id": session_id,
+        "filename": csv_path.name,
+        "plan": cached.get("plan", {}),
+        "results": cached.get("results", {}),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -668,9 +718,21 @@ async def preview_fix(session_id: str, req: PreviewFixRequest):
         cols_to_show = cols_to_show[:8]  # cap at 8 columns
 
         def _safe(v):
+            import numpy as np
             if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
                 return None
-            return v
+            if isinstance(v, (np.integer,)):
+                return int(v)
+            if isinstance(v, (np.floating,)):
+                f = float(v)
+                return None if (math.isnan(f) or math.isinf(f)) else f
+            if isinstance(v, np.bool_):
+                return bool(v)
+            if isinstance(v, np.ndarray):
+                return v.tolist()
+            if v is None or isinstance(v, (bool, int, float, str)):
+                return v
+            return str(v)
 
         def rows_to_records(df, idx, cols):
             return [

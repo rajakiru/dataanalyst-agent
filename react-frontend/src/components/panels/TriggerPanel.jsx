@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Upload } from 'lucide-react'
-import { getSamples, uploadFile, uploadSample, runPlan } from '../../api'
+import { getSamples, uploadFile, uploadSample, runPlan, loadCache } from '../../api'
 
 const CATEGORY_OPTIONS = [
   { key: 'visualizations',    label: 'Visualizations' },
@@ -22,6 +22,8 @@ export default function TriggerPanel({
   setEnabledCategories,
   setPlanData,
   setError,
+  setResults,
+  setEvents,
   results,
   filename,
 }) {
@@ -58,6 +60,29 @@ export default function TriggerPanel({
       setSelectedNode('analysis')
     } catch (e) {
       setError(e.message || 'Failed')
+    } finally {
+      setLoading(false)
+      setStatusMsg('')
+    }
+  }
+
+  async function handleCachedSample(name) {
+    setLoading(true)
+    setError(null)
+    setStatusMsg('Loading pre-computed results...')
+    try {
+      // Brief pause so the user sees the loading state
+      await new Promise(r => setTimeout(r, 800))
+      const data = await loadCache(name)
+      setSessionId(data.session_id)
+      setFilename(data.filename)
+      setPlanData(data.plan)
+      setEvents([])
+      setResults(data.results)
+      setStep('complete')
+      setSelectedNode('quality')
+    } catch (e) {
+      setError(e.message || 'Failed to load cache')
     } finally {
       setLoading(false)
       setStatusMsg('')
@@ -131,15 +156,21 @@ export default function TriggerPanel({
             <button
               key={s.name}
               disabled={!s.available || loading}
-              onClick={() => handleUploadAndPlan(() => uploadSample(s.name))}
+              onClick={() => s.cached
+                ? handleCachedSample(s.name)
+                : handleUploadAndPlan(() => uploadSample(s.name))
+              }
               className={[
-                'text-xs px-3 py-1.5 rounded-lg border font-medium transition-colors',
+                'text-xs px-3 py-1.5 rounded-lg border font-medium transition-colors flex items-center gap-1.5',
                 s.available && !loading
                   ? 'border-indigo-200 text-indigo-700 bg-indigo-50 hover:bg-indigo-100'
                   : 'border-slate-200 text-slate-400 cursor-not-allowed',
               ].join(' ')}
             >
               {s.name}
+              {s.cached && (
+                <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-semibold">instant</span>
+              )}
             </button>
           ))}
         </div>
