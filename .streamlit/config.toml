@@ -4,6 +4,7 @@ backgroundColor          = "#FAFAFA"
 secondaryBackgroundColor = "#EEF2F8"
 textColor                = "#1C2B4A"
 font                     = "sans serif"
+# Note: actual Calibri stack injected via st.markdown CSS in app.py
 
 [server]
 headless = true
