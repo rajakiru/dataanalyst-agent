@@ -22,7 +22,6 @@ export default function TriggerPanel({
   setEnabledCategories,
   setPlanData,
   setError,
-  setResults,
   setEvents,
   results,
   filename,
@@ -69,18 +68,15 @@ export default function TriggerPanel({
   async function handleCachedSample(name) {
     setLoading(true)
     setError(null)
-    setStatusMsg('Loading pre-computed results...')
+    setStatusMsg('Loading analysis plan...')
     try {
-      // Brief pause so the user sees the loading state
-      await new Promise(r => setTimeout(r, 800))
       const data = await loadCache(name)
       setSessionId(data.session_id)
       setFilename(data.filename)
       setPlanData(data.plan)
       setEvents([])
-      setResults(data.results)
-      setStep('complete')
-      setSelectedNode('quality')
+      setStep('review')
+      setSelectedNode('analysis')
     } catch (e) {
       setError(e.message || 'Failed to load cache')
     } finally {

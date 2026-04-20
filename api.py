@@ -324,7 +324,6 @@ async def load_cache(req: LoadCacheRequest):
     with open(cache_path) as f:
         cached = json.load(f)
 
-    # Create a session with the cached CSV path + pre-loaded results
     csv_path = SAMPLE_FILES.get(req.name)
     if not csv_path or not csv_path.exists():
         raise HTTPException(400, "Sample CSV not found")
@@ -333,17 +332,81 @@ async def load_cache(req: LoadCacheRequest):
     _SESSIONS[session_id] = {
         "csv_path": str(csv_path),
         "filename": csv_path.name,
-        "plan_state": None,
-        "results": cached.get("results", {}),
+        "plan_state": None,           # no real plan state needed
+        "cached_results": cached.get("results", {}),  # stored for replay
+        "results": None,
         "plot_dir": None,
     }
 
+    # Return plan for the review step — user still checks boxes and clicks Run
     return {
         "session_id": session_id,
         "filename": csv_path.name,
         "plan": cached.get("plan", {}),
-        "results": cached.get("results", {}),
     }
+
+
+def _build_synthetic_events(results: dict) -> list[dict]:
+    """Build a sequence of (event, delay_seconds) from cached results."""
+    import re as _re
+    events = []
+
+    def add(event, delay=0.35):
+        events.append((event, delay))
+
+    add({"type": "phase_start", "phase": "mcp_init"}, 0.4)
+    add({"type": "phase_start", "phase": "schema"}, 0.3)
+
+    # Replay tool_results (collection agent)
+    tool_results = results.get("tool_results") or []
+    collection_tools = [r for r in tool_results if r["tool"] != "infer_schema"]
+    schema_tools    = [r for r in tool_results if r["tool"] == "infer_schema"]
+
+    for r in schema_tools:
+        add({"type": "tool_start",  "tool": r["tool"], "args": r.get("args", {})}, 0.2)
+        add({"type": "tool_result", "tool": r["tool"], "result": r.get("result", {})}, 0.4)
+
+    add({"type": "phase_start", "phase": "planning"}, 0.5)
+    plan_text = results.get("analysis_plan", "Pre-computed analysis plan.")
+    add({"type": "plan_ready", "text": plan_text}, 0.6)
+
+    if collection_tools:
+        add({"type": "phase_start", "phase": "collection"}, 0.3)
+        delay_per = max(0.25, min(0.6, 5.0 / len(collection_tools)))
+        for r in collection_tools:
+            add({"type": "tool_start",  "tool": r["tool"], "args": r.get("args", {})}, 0.15)
+            add({"type": "tool_result", "tool": r["tool"], "result": r.get("result", {})}, delay_per)
+
+    # Quality tools
+    quality_results = results.get("quality_tool_results") or []
+    score_tools = [r for r in quality_results if r["tool"] == "compute_data_quality_score"]
+    other_q     = [r for r in quality_results if r["tool"] != "compute_data_quality_score"]
+
+    if score_tools:
+        add({"type": "phase_start", "phase": "quality_score"}, 0.3)
+        for r in score_tools:
+            add({"type": "tool_start",  "tool": r["tool"], "args": r.get("args", {})}, 0.15)
+            add({"type": "tool_result", "tool": r["tool"], "result": r.get("result", {})}, 0.5)
+
+    if other_q:
+        add({"type": "phase_start", "phase": "quality_tools"}, 0.25)
+        for r in other_q:
+            add({"type": "tool_start",  "tool": r["tool"], "args": r.get("args", {})}, 0.15)
+            add({"type": "tool_result", "tool": r["tool"], "result": r.get("result", {})}, 0.35)
+
+    add({"type": "phase_start", "phase": "quality_narrative"}, 0.3)
+
+    # Solutions tools
+    sol_results = results.get("solutions_tool_results") or []
+    if sol_results:
+        add({"type": "phase_start", "phase": "solutions"}, 0.3)
+        for r in sol_results:
+            add({"type": "tool_start",  "tool": r["tool"], "args": r.get("args", {})}, 0.15)
+            add({"type": "tool_result", "tool": r["tool"], "result": r.get("result", {})}, 0.4)
+
+    add({"type": "phase_start", "phase": "reporting"}, 0.4)
+
+    return events
 
 
 # ---------------------------------------------------------------------------
@@ -408,6 +471,26 @@ async def execute_stream(session_id: str, req: ExecuteRequest):
     session = _SESSIONS.get(session_id)
     if not session:
         raise HTTPException(404, "Session not found")
+
+    # ── Cached session: replay synthetic events, no real LLM calls ──────────
+    if session.get("cached_results") is not None:
+        cached_results = session["cached_results"]
+        session["results"] = cached_results  # make available for getResults
+
+        synthetic = _build_synthetic_events(cached_results)
+
+        async def replay():
+            for event, delay in synthetic:
+                await asyncio.sleep(delay)
+                yield f"data: {json.dumps(event)}\n\n"
+            yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+
+        return StreamingResponse(
+            replay(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    # ─────────────────────────────────────────────────────────────────────────
 
     plan_state = session.get("plan_state")
     if not plan_state:
