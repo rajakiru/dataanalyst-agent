@@ -225,16 +225,6 @@ export default function QualityPanel({ results }) {
           )}
         </div>
 
-        {/* Plots */}
-        {heatmapPaths.length > 0 && (
-          <div>
-            <h3 className="text-sm font-semibold text-slate-700 mb-2">Missing Value Map</h3>
-            {heatmapPaths.map((url, i) => (
-              <img key={i} src={url} alt="Missing heatmap" className="w-full rounded-lg border border-slate-200" />
-            ))}
-          </div>
-        )}
-
         {qqPaths.length > 0 && (
           <div>
             <h3 className="text-sm font-semibold text-slate-700 mb-2">Q-Q Plots</h3>

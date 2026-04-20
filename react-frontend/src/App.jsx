@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useCallback, useRef } from 'react'
 import TopBar from './components/TopBar'
 import Pipeline from './components/Pipeline'
 import RightPanel from './components/RightPanel'
@@ -59,6 +59,38 @@ export default function App() {
 
   const nodeStates = getNodeStates()
 
+  // Resizable split
+  const [leftWidth, setLeftWidth] = useState(null) // null = flex-1 default
+  const dragging = useRef(false)
+  const startX = useRef(0)
+  const startW = useRef(0)
+  const containerRef = useRef(null)
+
+  const onMouseDown = useCallback((e) => {
+    dragging.current = true
+    startX.current = e.clientX
+    startW.current = containerRef.current
+      ? containerRef.current.getBoundingClientRect().width *
+        (leftWidth != null ? leftWidth / 100 : 0.58)
+      : e.clientX
+    document.body.style.cursor = 'col-resize'
+    document.body.style.userSelect = 'none'
+  }, [leftWidth])
+
+  const onMouseMove = useCallback((e) => {
+    if (!dragging.current || !containerRef.current) return
+    const totalW = containerRef.current.getBoundingClientRect().width
+    const newW = startW.current + (e.clientX - startX.current)
+    const pct = Math.min(75, Math.max(25, (newW / totalW) * 100))
+    setLeftWidth(pct)
+  }, [])
+
+  const onMouseUp = useCallback(() => {
+    dragging.current = false
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+  }, [])
+
   const shared = {
     step, setStep, mode, setMode,
     selectedNode, setSelectedNode,
@@ -83,15 +115,34 @@ export default function App() {
       <TopBar model={model} setModel={setModel} models={AVAILABLE_MODELS}
               step={step} reset={reset} mode={mode} setMode={setMode} />
 
-      <div className="flex h-[calc(100vh-65px)]">
+      <div
+        ref={containerRef}
+        className="flex h-[calc(100vh-65px)]"
+        onMouseMove={onMouseMove}
+        onMouseUp={onMouseUp}
+        onMouseLeave={onMouseUp}
+      >
         {/* LEFT: Workflow canvas */}
-        <div className="flex-1 bg-slate-100 p-6 overflow-y-auto">
+        <div
+          className="bg-slate-100 p-6 overflow-y-auto"
+          style={leftWidth != null ? { width: `${leftWidth}%` } : { flex: 1 }}
+        >
           <Pipeline nodeStates={nodeStates} selectedNode={selectedNode}
                     setSelectedNode={setSelectedNode} step={step} results={results} />
         </div>
 
-        {/* RIGHT: Dynamic panel — fixed 420px */}
-        <div className="w-[420px] border-l border-slate-200 bg-white overflow-y-auto flex flex-col">
+        {/* Drag handle */}
+        <div
+          onMouseDown={onMouseDown}
+          className="w-1.5 bg-slate-200 hover:bg-indigo-400 cursor-col-resize transition-colors flex-shrink-0"
+          title="Drag to resize"
+        />
+
+        {/* RIGHT: Dynamic panel */}
+        <div
+          className="border-slate-200 bg-white overflow-y-auto flex flex-col"
+          style={leftWidth != null ? { width: `${100 - leftWidth}%` } : { width: '420px' }}
+        >
           <RightPanel {...shared} nodeStates={nodeStates} />
         </div>
       </div>

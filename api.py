@@ -19,7 +19,7 @@ from typing import Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 load_dotenv()
@@ -97,26 +97,39 @@ def _serialize_results(results: dict, session_id: str) -> dict:
     out["plot_paths"] = _copy_plots(results.get("plot_paths") or [])
     out["quality_plot_paths"] = _copy_plots(results.get("quality_plot_paths") or [])
 
-    # Make sure tool_results is JSON-serialisable (drop non-serialisable values)
-    def _clean(v):
+    # Deep-clean: replace NaN/Inf floats and non-serialisable objects
+    def _sanitize(v):
+        if isinstance(v, float):
+            import math
+            if math.isnan(v) or math.isinf(v):
+                return None
+            return v
+        if isinstance(v, dict):
+            return {k: _sanitize(val) for k, val in v.items()}
+        if isinstance(v, list):
+            return [_sanitize(i) for i in v]
         try:
-            json.dumps(v)
+            json.dumps(v, allow_nan=False)
             return v
         except (TypeError, ValueError):
             return str(v)
 
     out["tool_results"] = [
-        {"tool": r["tool"], "args": r.get("args", {}), "result": _clean(r["result"])}
+        {"tool": r["tool"], "args": _sanitize(r.get("args", {})), "result": _sanitize(r["result"])}
         for r in (results.get("tool_results") or [])
     ]
     out["quality_tool_results"] = [
-        {"tool": r["tool"], "args": r.get("args", {}), "result": _clean(r["result"])}
+        {"tool": r["tool"], "args": _sanitize(r.get("args", {})), "result": _sanitize(r["result"])}
         for r in (results.get("quality_tool_results") or [])
     ]
     out["solutions_tool_results"] = [
-        {"tool": r["tool"], "args": r.get("args", {}), "result": _clean(r.get("result", {}))}
+        {"tool": r["tool"], "args": _sanitize(r.get("args", {})), "result": _sanitize(r.get("result", {}))}
         for r in (results.get("solutions_tool_results") or [])
     ]
+    # Sanitize any remaining top-level fields that might contain NaN
+    for key in ("narrative", "quality_narrative", "solutions_narrative", "analysis_plan"):
+        if key in out:
+            out[key] = _sanitize(out[key])
     return out
 
 
@@ -365,7 +378,12 @@ async def execute_stream(session_id: str, req: ExecuteRequest):
                 API_KEY,
                 on_event,
             )
-            result_container["results"] = results
+            # Store results BEFORE signalling complete so getResults() never races
+            try:
+                serialized = _serialize_results(results, session_id)
+                session["results"] = serialized
+            except Exception as exc:
+                session["results"] = {"error": str(exc)}
             event_queue.put({"type": "complete"})
         except Exception as exc:
             event_queue.put({"type": "error", "message": str(exc)})
@@ -387,14 +405,6 @@ async def execute_stream(session_id: str, req: ExecuteRequest):
 
             if event.get("type") in ("complete", "error"):
                 break
-
-        # Store results in session after completion
-        if "results" in result_container:
-            try:
-                serialized = _serialize_results(result_container["results"], session_id)
-                session["results"] = serialized
-            except Exception as exc:
-                session["results"] = {"error": str(exc)}
 
     return StreamingResponse(
         generate(),
@@ -418,7 +428,13 @@ async def get_results(session_id: str):
     results = session.get("results")
     if not results:
         raise HTTPException(404, "Results not ready yet")
-    return results
+    # Serialize ourselves to handle any residual NaN/Inf that Starlette would reject
+    import re as _re
+    raw = json.dumps(results, allow_nan=True, default=str)
+    safe = _re.sub(r'\bNaN\b', 'null', raw)
+    safe = _re.sub(r'\bInfinity\b', 'null', safe)
+    safe = _re.sub(r'-Infinity\b', 'null', safe)
+    return Response(content=safe, media_type="application/json")
 
 
 # ---------------------------------------------------------------------------

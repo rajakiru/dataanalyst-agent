@@ -1,9 +1,11 @@
-import React, { useState } from 'react'
+import React from 'react'
 import { downloadCleanedCsv } from '../../api'
 
-export default function SolutionsPanel({ results, sessionId }) {
-  const [appliedSolutions, setAppliedSolutions] = useState([])
-  const [selectedSolutions, setSelectedSolutions] = useState(new Set())
+export default function SolutionsPanel({
+  results, sessionId,
+  appliedSolutions, setAppliedSolutions,
+  selectedSolutions, setSelectedSolutions,
+}) {
 
   const solutionsNarrative = results?.solutions_narrative || ''
   const solutionsToolResults = results?.solutions_tool_results || []
