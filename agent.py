@@ -92,6 +92,29 @@ def _detect_and_process_images(input_path: str, model: str, api_key: str = "") -
     
     # Check if it's a CSV file
     if os.path.isfile(input_path) and input_path.lower().endswith('.csv'):
+        # Peek at columns — if it has feature_* columns it's an image features CSV
+        # and should be treated as image_dataset so the right agent prompts are used.
+        try:
+            import pandas as _pd
+            _cols = _pd.read_csv(input_path, nrows=0).columns.tolist()
+            _feat_count = sum(1 for c in _cols if c.startswith("feature_"))
+            if _feat_count >= 16:
+                _n_rows = sum(1 for _ in open(input_path)) - 1
+                _nan_rows = int(_pd.read_csv(input_path)[
+                    [c for c in _cols if c.startswith("feature_")]
+                ].isnull().all(axis=1).sum())
+                _processed = _n_rows - _nan_rows
+                return input_path, {
+                    "processed_count":  _processed,
+                    "failed_count":     _nan_rows,
+                    "total_count":      _n_rows,
+                    "coverage_percent": round(_processed / _n_rows * 100, 1) if _n_rows else 100,
+                    "feature_dimension": _feat_count,
+                    "errors": [],
+                    "source": "precomputed_csv",
+                }
+        except Exception:
+            pass
         return input_path, {}
     
     # Check if it's a directory with images

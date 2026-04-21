@@ -48,11 +48,17 @@ _SESSIONS: dict[str, dict] = {}
 
 DATA_DIR = Path(__file__).parent / "data"
 SAMPLE_FILES = {
-    "Iris (clean)":        DATA_DIR / "iris.csv",
-    "Iris (corrupted)":    DATA_DIR / "iris_corrupted.csv",
-    "Titanic":             Path(__file__).parent / "Titanic-Dataset.csv",
-    "Titanic (corrupted)": DATA_DIR / "titanic_corrupted.csv",
+    "Iris (clean)":          DATA_DIR / "iris.csv",
+    "Iris (corrupted)":      DATA_DIR / "iris_corrupted.csv",
+    "Titanic":               Path(__file__).parent / "Titanic-Dataset.csv",
+    "Titanic (corrupted)":   DATA_DIR / "titanic_corrupted.csv",
+    "Flowers (corrupted)":   DATA_DIR / "flowers_corrupted_features.csv",
 }
+
+# Flowers demo cached artifacts
+FLOWERS_POSTFIX_CSV  = DATA_DIR / "flowers_postfix_features.csv"
+FLOWERS_DALLE_DIR    = DATA_DIR / "flowers_dalle"
+FLOWERS_MANIFEST     = DATA_DIR / "flowers_corrupted_manifest.json"
 
 API_KEY = os.getenv("OPENAI_API_KEY", "")
 
@@ -292,7 +298,8 @@ CACHE_DIR = DATA_DIR / "cache"
 
 # Maps sample name → cache filename stem
 SAMPLE_CACHE = {
-    "Titanic (corrupted)": "titanic_corrupted",
+    "Titanic (corrupted)":  "titanic_corrupted",
+    "Flowers (corrupted)":  "flowers_corrupted",
 }
 
 @app.get("/api/samples")
@@ -633,18 +640,31 @@ async def download_cleaned_csv(session_id: str, req: CleanedCsvRequest):
     try:
         import pandas as pd
 
-        df = pd.read_csv(csv_path)
-        for item in req.applied_solutions:
-            code = item.get("code", "")
-            if code:
-                try:
-                    exec(code, {"df": df, "pd": pd})  # noqa: S102
-                except Exception:
-                    pass
-
-        buf = io.StringIO()
-        df.to_csv(buf, index=False)
-        csv_bytes = buf.getvalue().encode("utf-8")
+        # Image-generation fix: return the pre-computed post-fix CSV directly
+        has_image_gen = any(
+            item.get("fix_type") == "image_generation"
+            for item in req.applied_solutions
+        )
+        if has_image_gen:
+            if not FLOWERS_POSTFIX_CSV.exists():
+                raise HTTPException(500, "Post-fix CSV not found. Run data/setup_flowers_demo.py")
+            csv_bytes = FLOWERS_POSTFIX_CSV.read_bytes()
+        else:
+            df = pd.read_csv(csv_path)
+            for item in req.applied_solutions:
+                code = item.get("code", "")
+                if code and "df" in code:
+                    try:
+                        local_ns = {"df": df, "pd": pd}
+                        exec(code, local_ns)  # noqa: S102
+                        df = local_ns.get("df", df)
+                    except Exception:
+                        pass
+            buf = io.StringIO()
+            df.to_csv(buf, index=False)
+            csv_bytes = buf.getvalue().encode("utf-8")
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(500, f"Failed to build cleaned CSV: {exc}")
 
@@ -663,44 +683,73 @@ async def download_cleaned_csv(session_id: str, req: CleanedCsvRequest):
 # ---------------------------------------------------------------------------
 
 def _compute_quality_from_df(df) -> dict:
-    """Replicates mcp_server._compute_data_quality_score logic on a DataFrame."""
+    """Compute quality score from a DataFrame for simulate-fix delta display."""
     import numpy as np
 
     total = len(df)
     if total == 0:
         return {"overall_score": 0, "issue_count": 0}
 
-    # Completeness
-    non_null = df.notnull().sum().sum()
-    completeness = (non_null / (total * len(df.columns))) * 100 if len(df.columns) else 100
+    feature_cols = [c for c in df.columns if c.startswith("feature_")]
+    is_image_dataset = len(feature_cols) > 0
+
+    # Image metadata columns are expected to be constant — skip variance checks
+    _SKIP_VARIANCE = {
+        "width_px", "height_px", "aspect_ratio", "mode", "format",
+        "file_size_kb",
+    }
+
+    # Completeness — for image datasets use row-level coverage (fraction of rows
+    # with no NaN features), which better reflects cascade risk than cell-level %
+    if is_image_dataset:
+        nan_row_mask = df[feature_cols].isnull().all(axis=1)
+        nan_rows     = int(nan_row_mask.sum())
+        completeness = ((total - nan_rows) / total) * 100
+    else:
+        non_null     = df.notnull().sum().sum()
+        completeness = (non_null / (total * len(df.columns))) * 100 if len(df.columns) else 100
+        nan_rows     = 0
 
     # Uniqueness
-    dup_rows = df.duplicated().sum()
+    dup_rows   = df.duplicated().sum()
     uniqueness = ((total - dup_rows) / total) * 100
 
-    # Consistency: penalise zero-variance numeric cols and mixed-type cols
+    # Consistency: skip feature_* and known-constant image metadata columns
     penalty = 0
     for col in df.columns:
+        if col.startswith("feature_") or col in _SKIP_VARIANCE:
+            continue
         if df[col].dtype in (float, int) or np.issubdtype(df[col].dtype, np.number):
             if df[col].nunique() <= 1:
                 penalty += 10
         else:
             non_null_vals = df[col].dropna()
-            if len(non_null_vals) > 0:
-                types = non_null_vals.apply(type).nunique()
-                if types > 1:
-                    penalty += 5
+            if len(non_null_vals) > 0 and non_null_vals.apply(type).nunique() > 1:
+                penalty += 5
     consistency = max(0.0, 100.0 - penalty)
 
-    overall = completeness * 0.4 + uniqueness * 0.3 + consistency * 0.3
+    base = completeness * 0.4 + uniqueness * 0.3 + consistency * 0.3
 
-    # Count issues (simple heuristic matching mcp_server logic)
+    # For image datasets apply a cascade risk multiplier: when whole rows are
+    # missing the downstream model impact is non-linear.  Coverage < 90% → score
+    # is scaled down proportionally (e.g. 80% coverage → 0.87× multiplier).
+    if is_image_dataset and nan_rows > 0:
+        coverage = (total - nan_rows) / total   # 0.0 – 1.0
+        cascade_factor = 0.5 + 0.5 * coverage   # 80% coverage → 0.90, 75% → 0.875
+        overall = base * cascade_factor
+    else:
+        overall = base
+
+    # Issue count
     issues = []
-    for col in df.columns:
-        null_pct = df[col].isnull().mean() * 100
-        if null_pct > 5:
-            sev = "high" if null_pct > 20 else "medium"
-            issues.append({"column": col, "severity": sev})
+    if is_image_dataset:
+        if nan_rows > 0:
+            issues.append({"column": "features", "severity": "high" if nan_rows > 2 else "medium"})
+    else:
+        for col in df.columns:
+            null_pct = df[col].isnull().mean() * 100
+            if null_pct > 5:
+                issues.append({"column": col, "severity": "high" if null_pct > 20 else "medium"})
     if dup_rows > 0:
         issues.append({"column": "all", "severity": "high" if dup_rows / total > 0.05 else "medium"})
 
@@ -727,24 +776,36 @@ async def simulate_fix(session_id: str, req: SimulateFixRequest):
         df_before = pd.read_csv(csv_path)
         before = _compute_quality_from_df(df_before)
 
-        df_after = df_before.copy()
-        for item in req.applied_solutions:
-            code = item.get("code", "")
-            if code:
-                try:
-                    exec(code, {"df": df_after, "pd": pd})  # noqa: S102
-                except Exception:
-                    pass
-
-        after = _compute_quality_from_df(df_after)
+        # If any applied fix is image_generation, use the pre-computed post-fix CSV
+        has_image_gen = any(
+            item.get("fix_type") == "image_generation"
+            for item in req.applied_solutions
+        )
+        if has_image_gen:
+            if not FLOWERS_POSTFIX_CSV.exists():
+                raise HTTPException(500, "Post-fix CSV not found. Run data/setup_flowers_demo.py")
+            df_after = pd.read_csv(str(FLOWERS_POSTFIX_CSV))
+            after = _compute_quality_from_df(df_after)
+        else:
+            df_after = df_before.copy()
+            for item in req.applied_solutions:
+                code = item.get("code", "")
+                if code and "df" in code:
+                    try:
+                        local_ns = {"df": df_after, "pd": pd}
+                        exec(code, local_ns)  # noqa: S102
+                        df_after = local_ns.get("df", df_after)
+                    except Exception:
+                        pass
+            after = _compute_quality_from_df(df_after)
 
     except Exception as exc:
         raise HTTPException(500, f"Simulation failed: {exc}")
 
     return {
         "before": before,
-        "after": after,
-        "delta": after["overall_score"] - before["overall_score"],
+        "after":  after,
+        "delta":  after["overall_score"] - before["overall_score"],
     }
 
 
@@ -753,13 +814,16 @@ async def simulate_fix(session_id: str, req: SimulateFixRequest):
 # ---------------------------------------------------------------------------
 
 class PreviewFixRequest(BaseModel):
-    code: str
-    column: str = ""   # which column the fix targets (for focused diff)
-    n_rows: int = 15   # sample size
+    code: str = ""
+    column: str = ""       # which column the fix targets (for focused diff)
+    n_rows: int = 15       # sample size
+    fix_type: str | None = None
+    flower_type: str = "daisy"   # for image_generation: which flower to show
 
 
 @app.post("/api/preview-fix/{session_id}")
 async def preview_fix(session_id: str, req: PreviewFixRequest):
+    import base64
     import math
     import pandas as pd
 
@@ -767,6 +831,94 @@ async def preview_fix(session_id: str, req: PreviewFixRequest):
     if not session:
         raise HTTPException(404, "Session not found")
 
+    # ------------------------------------------------------------------
+    # Image-generation fix: serve pre-computed NaN→filled diff + image
+    # ------------------------------------------------------------------
+    if req.fix_type == "image_generation":
+        if not FLOWERS_POSTFIX_CSV.exists():
+            raise HTTPException(500, "Post-fix CSV not found. Run data/setup_flowers_demo.py")
+
+        df_before = pd.read_csv(session.get("csv_path", ""))
+        df_after  = pd.read_csv(str(FLOWERS_POSTFIX_CSV))
+
+        feature_cols = [c for c in df_before.columns if c.startswith("feature_")]
+        nan_mask = df_before[feature_cols].isnull().all(axis=1)
+        nan_idx  = df_before.index[nan_mask].tolist()
+
+        # Show: image_id, flower_class, filename, feature_0..4 (first 5 features)
+        cols_to_show = ["image_id", "flower_class", "filename"] + feature_cols[:5]
+        cols_to_show = [c for c in cols_to_show if c in df_before.columns]
+
+        def _safe(v):
+            if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+                return None
+            import numpy as np
+            if isinstance(v, (np.integer,)):  return int(v)
+            if isinstance(v, (np.floating,)):
+                f = float(v)
+                return None if (math.isnan(f) or math.isinf(f)) else f
+            if isinstance(v, np.bool_):  return bool(v)
+            if v is None or isinstance(v, (bool, int, float, str)):  return v
+            return str(v)
+
+        before_rows = [
+            {c: _safe(df_before.at[i, c]) for c in cols_to_show if c in df_before.columns}
+            for i in nan_idx
+        ]
+
+        # df_after may have same index or be realigned — match by filename
+        after_rows = []
+        for i in nan_idx:
+            fname = df_before.at[i, "filename"]
+            match = df_after[df_after["filename"] == fname]
+            if not match.empty:
+                j = match.index[0]
+                after_rows.append(
+                    {c: _safe(df_after.at[j, c]) for c in cols_to_show if c in df_after.columns}
+                )
+            else:
+                after_rows.append({c: None for c in cols_to_show})
+
+        changed_cells = []
+        for row_pos in range(len(nan_idx)):
+            for c in cols_to_show:
+                bv = before_rows[row_pos].get(c)
+                av = after_rows[row_pos].get(c) if row_pos < len(after_rows) else None
+                if bv != av:
+                    changed_cells.append({"row": row_pos, "col": c})
+
+        # Load pre-generated DALL-E placeholder image
+        flower = req.flower_type.lower().strip() or "daisy"
+        img_path = FLOWERS_DALLE_DIR / f"dalle_{flower}.png"
+        if not img_path.exists():
+            # Fall back to any available dalle image
+            candidates = list(FLOWERS_DALLE_DIR.glob("dalle_*.png"))
+            img_path = candidates[0] if candidates else None
+
+        image_b64 = None
+        if img_path and img_path.exists():
+            image_b64 = base64.b64encode(img_path.read_bytes()).decode()
+
+        prompt = (
+            f"a single vibrant {flower} flower, studio photograph, "
+            "isolated on a clean white background, high detail, photorealistic"
+        )
+
+        return {
+            "columns":       cols_to_show,
+            "before":        before_rows,
+            "after":         after_rows,
+            "changed_cells": changed_cells,
+            "total_affected": len(nan_idx),
+            "exec_error":    None,
+            "image_b64":     image_b64,
+            "image_prompt":  prompt,
+            "flower_type":   flower,
+        }
+
+    # ------------------------------------------------------------------
+    # Standard tabular fix
+    # ------------------------------------------------------------------
     csv_path = session.get("csv_path", "")
     if not csv_path or not os.path.exists(csv_path):
         raise HTTPException(400, "Original CSV not available")
@@ -776,12 +928,12 @@ async def preview_fix(session_id: str, req: PreviewFixRequest):
         df_after = df_before.copy()
         exec_error = None
         try:
-            exec(req.code, {"df": df_after, "pd": pd})  # noqa: S102
+            local_ns = {"df": df_after, "pd": pd}
+            exec(req.code, local_ns)  # noqa: S102
+            df_after = local_ns.get("df", df_after)
         except Exception as e:
             exec_error = str(e)
 
-        # Focus on affected rows: prefer rows where the target column changed,
-        # fall back to rows that had NaN before (most informative for imputation).
         col = req.column if req.column and req.column in df_before.columns else None
 
         if col:
@@ -794,11 +946,10 @@ async def preview_fix(session_id: str, req: PreviewFixRequest):
 
         sample_idx = focus_idx[: req.n_rows]
 
-        # Columns to show: target col + a couple of context cols
         cols_to_show = list(df_before.columns) if col is None else (
             [col] + [c for c in df_before.columns if c != col][:4]
         )
-        cols_to_show = cols_to_show[:8]  # cap at 8 columns
+        cols_to_show = cols_to_show[:8]
 
         def _safe(v):
             import numpy as np
@@ -826,7 +977,6 @@ async def preview_fix(session_id: str, req: PreviewFixRequest):
         before_rows = rows_to_records(df_before, sample_idx, cols_to_show)
         after_rows  = rows_to_records(df_after,  sample_idx, cols_to_show)
 
-        # Mark which cells changed
         changed_cells = []
         for row_pos, i in enumerate(sample_idx):
             for c in cols_to_show:
@@ -842,12 +992,12 @@ async def preview_fix(session_id: str, req: PreviewFixRequest):
         raise HTTPException(500, f"Preview failed: {exc}")
 
     return {
-        "columns": cols_to_show,
-        "before": before_rows,
-        "after":  after_rows,
+        "columns":       cols_to_show,
+        "before":        before_rows,
+        "after":         after_rows,
         "changed_cells": changed_cells,
         "total_affected": len(focus_idx),
-        "exec_error": exec_error,
+        "exec_error":    exec_error,
     }
 
 
@@ -885,6 +1035,65 @@ async def download_plots_zip(session_id: str):
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{stem}_plots.zip"'},
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/cache-plots/{sample}/{filename}  — serve pre-computed static plots
+# ---------------------------------------------------------------------------
+
+@app.get("/api/cache-plots/{sample}/{filename}")
+async def get_cache_plot(sample: str, filename: str):
+    # folder is either "{sample}_plots" or just "{sample}" depending on convention
+    folder = DATA_DIR / "cache" / f"{sample}_plots"
+    if not folder.exists():
+        folder = DATA_DIR / "cache" / sample
+    plot_path = folder / filename
+    if not plot_path.exists():
+        raise HTTPException(404, "Cache plot not found")
+    return FileResponse(str(plot_path), media_type="image/png")
+
+
+# ---------------------------------------------------------------------------
+# POST /api/generate-flower-image/{session_id}  — DALL-E 2 synthetic image
+# ---------------------------------------------------------------------------
+
+class GenerateImageRequest(BaseModel):
+    flower_type: str = "flower"   # e.g. "daisy", "rose", "tulip", …
+
+
+@app.post("/api/generate-flower-image/{session_id}")
+async def generate_flower_image(session_id: str, req: GenerateImageRequest):
+    """Call DALL-E 2 to generate a synthetic replacement flower image."""
+    import base64
+    from openai import OpenAI
+
+    session = _SESSIONS.get(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    if not openai_key:
+        raise HTTPException(400, "OPENAI_API_KEY not set")
+
+    flower = req.flower_type.lower().strip() or "flower"
+    prompt = (
+        f"a single vibrant {flower} flower, studio photograph, "
+        "isolated on a clean white background, high detail, photorealistic"
+    )
+
+    try:
+        client = OpenAI(api_key=openai_key)
+        response = client.images.generate(
+            model="dall-e-2",
+            prompt=prompt,
+            n=1,
+            size="256x256",
+            response_format="b64_json",
+        )
+        b64 = response.data[0].b64_json
+        return {"image_b64": b64, "prompt": prompt, "flower_type": flower}
+    except Exception as exc:
+        raise HTTPException(500, f"DALL-E generation failed: {exc}")
 
 
 if __name__ == "__main__":

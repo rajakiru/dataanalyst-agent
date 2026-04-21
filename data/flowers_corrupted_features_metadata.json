@@ -1,0 +1,10 @@
+{
+  "processed_count": 16,
+  "failed_count": 0,
+  "total_count": 16,
+  "coverage_percent": 100.0,
+  "feature_dimension": 96,
+  "errors": [],
+  "processing_timestamp": "2026-04-20T14:31:15.301962",
+  "source_directory": "data/flowers_corrupted"
+}

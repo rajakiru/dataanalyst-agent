@@ -1,0 +1,22 @@
+{
+  "expected_count": 20,
+  "deleted_count": 4,
+  "deleted_images": [
+    {
+      "filename": "daisy_flower_003.png",
+      "flower_class": "daisy"
+    },
+    {
+      "filename": "lavender_flower_007.png",
+      "flower_class": "lavender"
+    },
+    {
+      "filename": "rose_flower_012.png",
+      "flower_class": "rose"
+    },
+    {
+      "filename": "sunflower_flower_019.png",
+      "flower_class": "sunflower"
+    }
+  ]
+}

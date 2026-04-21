@@ -148,14 +148,24 @@ export function getPlotUrl(session_id, filename) {
   return `${BASE}/api/plots/${session_id}/${filename}`
 }
 
-export async function previewFix(session_id, code, column = '', n_rows = 15) {
+export async function previewFix(session_id, code, column = '', n_rows = 15, fix_type = null, flower_type = 'daisy') {
   const res = await fetch(`${BASE}/api/preview-fix/${session_id}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ code, column, n_rows }),
+    body: JSON.stringify({ code, column, n_rows, fix_type, flower_type }),
   })
   if (!res.ok) throw new Error(await res.text())
   return res.json()
+}
+
+export async function generateFlowerImage(session_id, flower_type = 'flower') {
+  const res = await fetch(`${BASE}/api/generate-flower-image/${session_id}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ flower_type }),
+  })
+  if (!res.ok) throw new Error(await res.text())
+  return res.json()  // { image_b64, prompt, flower_type }
 }
 
 export async function simulateFix(session_id, applied_solutions = []) {
